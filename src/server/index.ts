@@ -2,10 +2,16 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { Config } from "../config/index.js";
 import { Repo } from "../store/repo.js";
 import { createProxyHandler } from "./proxy.js";
+import { Pricing } from "../pricing/index.js";
+import { BudgetTracker } from "../budget/tracker.js";
+import { LintEngine } from "../lint/engine.js";
 
 export type TollgateServer = {
   app: FastifyInstance;
   repo: Repo;
+  pricing: Pricing;
+  budget: BudgetTracker;
+  lint: LintEngine;
 };
 
 export function buildServer(config: Config, opts: { logger?: boolean } = {}): TollgateServer {
@@ -23,9 +29,15 @@ export function buildServer(config: Config, opts: { logger?: boolean } = {}): To
   });
 
   const repo = new Repo(config.storagePath);
+  const pricing = new Pricing(config.pricingOverrides);
+  const budget = new BudgetTracker(config.budget, (sinceTs) => repo.totalsSince(sinceTs));
+  const lint = new LintEngine(config.lint);
 
   for (const route of config.routes) {
-    app.post(route.path, createProxyHandler(route, repo));
+    app.post(
+      route.path,
+      createProxyHandler(route, { repo, pricing, budget, lint, cacheConfig: config.cache }),
+    );
   }
 
   // Liveness probe (not a provider route).
@@ -35,5 +47,5 @@ export function buildServer(config: Config, opts: { logger?: boolean } = {}): To
     repo.close();
   });
 
-  return { app, repo };
+  return { app, repo, pricing, budget, lint };
 }

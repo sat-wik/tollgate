@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, type Config } from "../src/config/index.js";
 import { buildServer, type TollgateServer } from "../src/server/index.js";
+import { DEFAULT_LINT_CONFIG } from "../src/lint/rules/types.js";
+import { DEFAULT_CACHE_CONFIG } from "../src/cache/detector.js";
 import { startMockUpstream, type MockUpstream } from "./upstream-mock.js";
 
 let mock: MockUpstream;
@@ -29,6 +31,16 @@ function testConfig(): Config {
         injectUsage: true,
       },
     ],
+    budget: { thresholds: [0.8, 1.0], block: false },
+    // Give the mock models a price so cost columns are exercised.
+    pricingOverrides: {
+      "anthropic/claude-test": { inputPerMTok: 1.0, outputPerMTok: 5.0 },
+      "openai/gpt-test": { inputPerMTok: 2.5, outputPerMTok: 10.0 },
+    },
+    lint: DEFAULT_LINT_CONFIG,
+    // Lower the prefix threshold so the caching path is exercisable with a
+    // modest prompt (default 1024 tokens would need a very large fixture).
+    cache: { ...DEFAULT_CACHE_CONFIG, minPrefixTokens: 50 },
   };
 }
 
@@ -88,6 +100,61 @@ describe("M1 transparent proxy", () => {
     expect(rows[0].contentHash).toMatch(/^[0-9a-f]{64}$/);
     expect(rows[0].rawLogged).toBe(false);
     expect(rows[0].upstreamMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("persists the pre-flight token estimate and computed cost (M2)", async () => {
+    const res = await inject("/v1/messages", {
+      model: "claude-test",
+      messages: [{ role: "user", content: "Estimate my tokens please, this is a longer message." }],
+    });
+    // Pre-flight estimate is surfaced as response headers.
+    expect(Number(res.headers["x-tollgate-input-tokens-est"])).toBeGreaterThan(0);
+    expect(res.headers["x-tollgate-input-accuracy"]).toBe("approx");
+
+    const row = server.repo.recentRequests()[0];
+    expect(row.inputTokensEst).toBeGreaterThan(0);
+    // Cost computed from actual usage (in=42, out=7) at 1.0/5.0 per MTok.
+    expect(row.estInputCost).toBeCloseTo((42 / 1_000_000) * 1.0, 9);
+    expect(row.estOutputCost).toBeCloseTo((7 / 1_000_000) * 5.0, 9);
+  });
+
+  it("runs the lint engine and persists findings for a wasteful prompt (M3)", async () => {
+    const big = Array.from({ length: 6000 }, (_, i) => `w${i % 97}`).join(" ");
+    const res = await inject("/v1/messages", {
+      model: "claude-test",
+      messages: [{ role: "user", content: big }],
+    });
+    expect(Number(res.headers["x-tollgate-lint-findings"])).toBeGreaterThanOrEqual(1);
+    expect(Number(res.headers["x-tollgate-tokens-wasted-est"])).toBeGreaterThan(0);
+
+    const row = server.repo.recentRequests()[0];
+    const findings = server.repo.getFindings(row.id);
+    expect(findings.some((f) => f.rule === "oversized-paste")).toBe(true);
+  });
+
+  it("detects a caching opportunity on a repeated prefix (M3)", async () => {
+    const system = Array.from({ length: 120 }, (_, i) => `ctx${i % 40}`).join(" ");
+    const body = (q: string) => ({ model: "claude-test", system, messages: [{ role: "user", content: q }] });
+
+    await inject("/v1/messages", body("first question")); // seeds the window
+    await inject("/v1/messages", body("second question")); // shares the prefix
+
+    const rows = server.repo.recentRequests();
+    const latest = server.repo.getFindings(rows[0].id);
+    const cacheFinding = latest.find((f) => f.rule === "cache-opportunity");
+    expect(cacheFinding).toBeDefined();
+    expect(cacheFinding!.tokensWastedEst).toBeGreaterThanOrEqual(50);
+  });
+
+  it("reports estimated cost as unknown for an unpriced model", async () => {
+    const res = await inject("/v1/messages", {
+      model: "claude-unpriced-model",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(res.headers["x-tollgate-est-input-cost-usd"]).toBe("unknown");
+    const row = server.repo.recentRequests()[0];
+    expect(row.estInputCost).toBeNull();
+    expect(row.estOutputCost).toBeNull();
   });
 
   it("captures usage from a streamed Anthropic response", async () => {

@@ -7,6 +7,19 @@ import type { Repo } from "../store/repo.js";
 import { parseRequest } from "../adapters/index.js";
 import { contentHash } from "../util/hash.js";
 import { extractUsage } from "./usage.js";
+import { getTokenizer, countTextTokens } from "../tokenizer/index.js";
+import type { Pricing } from "../pricing/index.js";
+import type { BudgetTracker } from "../budget/tracker.js";
+import type { LintEngine, Finding } from "../lint/engine.js";
+import { PrefixCacheDetector, type CacheConfig } from "../cache/detector.js";
+
+export type ProxyDeps = {
+  repo: Repo;
+  pricing: Pricing;
+  budget: BudgetTracker;
+  lint: LintEngine;
+  cacheConfig: CacheConfig;
+};
 
 // Hop-by-hop headers must not be forwarded (RFC 7230 §6.1). content-length is
 // recomputed from the forwarded body; host is derived from the upstream URL.
@@ -52,9 +65,14 @@ function maybeInjectUsage(
   return { body: Buffer.from(JSON.stringify(next)), mutated: true };
 }
 
-export function createProxyHandler(route: RouteConfig, repo: Repo) {
+export function createProxyHandler(route: RouteConfig, deps: ProxyDeps) {
+  const { repo, pricing, budget, lint } = deps;
   const upstream = new URL(route.upstream);
   const client = upstream.protocol === "https:" ? https : http;
+  const tokenizer = getTokenizer(route.provider);
+  const modelKeyFor = (model: string): string => `${route.provider}/${model}`;
+  // One rolling-window cache detector per route (CLAUDE.md §6.5).
+  const cacheDetector = new PrefixCacheDetector(deps.cacheConfig, countTextTokens);
 
   return async function handler(req: FastifyRequest, reply: FastifyReply): Promise<void> {
     const rawBody = req.body as Buffer;
@@ -68,6 +86,24 @@ export function createProxyHandler(route: RouteConfig, repo: Repo) {
 
     const normalized = parseRequest(route.provider, parsed, rawBody);
     const { body: forwardBody } = maybeInjectUsage(route, parsed, rawBody);
+
+    // Pre-flight estimate (PRD §5.2): count input tokens locally before forwarding.
+    const estimate = tokenizer.countMessages(normalized);
+    const modelKey = modelKeyFor(normalized.model);
+    const preflightCost = pricing.price(modelKey, estimate.inputTokens, 0);
+
+    // Context-hygiene lint (§5.3) + caching-opportunity detection (§5.4). All
+    // deterministic and local. Findings are persisted at finalize with the row id.
+    const findings: Finding[] = lint.run(normalized);
+    const cacheMatch = cacheDetector.detect(normalized);
+    if (cacheMatch) {
+      findings.push({
+        rule: "cache-opportunity",
+        severity: "info",
+        tokensWastedEst: cacheMatch.repeatedTokens,
+        message: `This request shares a ~${cacheMatch.repeatedTokens.toLocaleString()}-token prefix with a recent request. Enabling prompt caching (e.g. Anthropic cache breakpoints / OpenAI automatic caching) could serve those input tokens at the cached rate.`,
+      });
+    }
 
     const headers = filterRequestHeaders(req.raw.headers);
     headers["content-length"] = Buffer.byteLength(forwardBody);
@@ -87,7 +123,24 @@ export function createProxyHandler(route: RouteConfig, repo: Repo) {
       target,
       { method: req.method, headers },
       (upstreamRes) => {
-        out.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
+        // Surface the pre-flight estimate to programmatic consumers as response
+        // headers (PRD §5.2). These are additive; the relayed body is untouched.
+        const tollgateHeaders: http.OutgoingHttpHeaders = {
+          "x-tollgate-input-tokens-est": String(estimate.inputTokens),
+          "x-tollgate-input-accuracy": estimate.accuracy,
+        };
+        if (preflightCost) {
+          tollgateHeaders["x-tollgate-est-input-cost-usd"] = preflightCost.inputCost.toFixed(6);
+        } else {
+          tollgateHeaders["x-tollgate-est-input-cost-usd"] = "unknown";
+        }
+        tollgateHeaders["x-tollgate-lint-findings"] = String(findings.length);
+        const wasted = findings.reduce((s, f) => s + f.tokensWastedEst, 0);
+        if (wasted > 0) tollgateHeaders["x-tollgate-tokens-wasted-est"] = String(Math.round(wasted));
+        out.writeHead(upstreamRes.statusCode ?? 502, {
+          ...upstreamRes.headers,
+          ...tollgateHeaders,
+        });
 
         upstreamRes.on("data", (chunk: Buffer) => {
           captured.push(chunk);
@@ -127,24 +180,50 @@ export function createProxyHandler(route: RouteConfig, repo: Repo) {
     ): void {
       const upstreamMs = Date.now() - started;
       const usage = extractUsage(route.provider, Buffer.concat(captured), resHeaders);
+
+      // Cost from actual usage where the provider reported it; fall back to the
+      // local input estimate so a row always carries a best-effort cost.
+      const inputForCost = usage.inputTokens ?? estimate.inputTokens;
+      const outputForCost = usage.outputTokens ?? 0;
+      const cost = pricing.price(modelKey, inputForCost, outputForCost);
+      const requestId = randomUUID();
+
       try {
         repo.insertRequest({
-          id: randomUUID(),
+          id: requestId,
           ts: started,
           provider: route.provider,
           model: normalized.model,
           routeLabel: route.label,
-          inputTokensEst: null,
+          inputTokensEst: estimate.inputTokens,
           inputTokensActual: usage.inputTokens ?? null,
           outputTokensActual: usage.outputTokens ?? null,
-          estInputCost: null,
-          estOutputCost: null,
+          estInputCost: cost?.inputCost ?? null,
+          estOutputCost: cost?.outputCost ?? null,
           upstreamMs,
           contentHash: contentHash(normalized),
           rawLogged: route.rawLog,
         });
+        repo.insertFindings(requestId, findings);
       } catch (err) {
         req.log.error({ err }, "failed to persist request record");
+      }
+
+      // Add this request's prefix to the rolling window for future cache matches.
+      cacheDetector.observe(normalized, requestId);
+
+      // Budget accounting runs after persistence so daily totals include this row.
+      try {
+        const totalTokens = inputForCost + outputForCost;
+        const warnings = budget.record(totalTokens, cost?.total ?? 0);
+        for (const w of warnings) {
+          req.log.warn(
+            { scope: w.scope, metric: w.metric, used: w.used, limit: w.limit, ratio: Number(w.ratio.toFixed(3)) },
+            `budget ${w.scope} ${w.metric} crossed ${Math.round(w.threshold * 100)}%`,
+          );
+        }
+      } catch (err) {
+        req.log.error({ err }, "budget accounting failed");
       }
     }
   };

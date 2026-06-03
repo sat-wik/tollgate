@@ -33,3 +33,37 @@ raw_log = false
 # a streaming OpenAI request without stream_options.include_usage, we inject it so
 # token usage is reported in the final chunk. Opt out by setting this to false.
 inject_usage = true
+
+# --- Budgets (PRD §5.5) -------------------------------------------------------
+# Per-session and per-day ceilings. Omit a key (or set 0) to disable that limit.
+# Warnings fire when usage crosses each threshold fraction. In v1, 100% warns
+# prominently but does NOT block; blocking is opt-in and otherwise deferred.
+[budget]
+# session_tokens = 200000
+# session_cost   = 5.00
+# daily_tokens   = 2000000
+# daily_cost     = 20.00
+thresholds = [0.8, 1.0]
+block = false
+
+# --- Pricing overrides (CLAUDE.md §6.3) ---------------------------------------
+# Optional per-model overrides merged over the bundled table (src/pricing/table.json).
+# Keys are "provider/model"; values are USD per million tokens.
+# [pricing.overrides."anthropic/claude-haiku-4-5"]
+# inputPerMTok = 1.00
+# outputPerMTok = 5.00
+# cachedInputPerMTok = 0.10
+
+# --- Context-hygiene lint (PRD §5.3, CLAUDE.md §6.4) --------------------------
+# Deterministic heuristics, no model calls. Thresholds are tunable.
+[lint]
+oversized_paste_tokens = 4000   # flag a single text block larger than this
+duplicate_min_tokens = 50       # ignore near-duplicate blocks smaller than this
+duplicate_similarity = 0.8      # Jaccard shingle similarity to treat as duplicate
+multimodal_tokens = 5000        # flag when total image/document tokens exceed this
+stale_history_depth = 20        # flag conversation turns beyond this depth
+
+# --- Caching-opportunity detection (PRD §5.4, CLAUDE.md §6.5) -----------------
+[cache]
+window_size = 100               # rolling window of recent request prefixes per route
+min_prefix_tokens = 1024        # minimum shared prefix to surface a caching opportunity

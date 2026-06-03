@@ -42,8 +42,18 @@ const model =
   process.env.TOLLGATE_E2E_MODEL ??
   (provider === "anthropic" ? "claude-haiku-4-5" : "gpt-4o-mini");
 
+// A deliberately wasteful prompt (duplicated oversized block) to exercise the
+// M3 lint rules end-to-end. Enable with TOLLGATE_E2E_WASTEFUL=1.
+function wastefulPrompt(): string {
+  const block = Array.from({ length: 5000 }, (_, i) => `word${i % 200}`).join(" ");
+  return `Here is a file:\n${block}\n\nAnd here is the same file again:\n${block}\n\nSummarize it.`;
+}
+
 function buildRequest(stream: boolean): { path: string; headers: Record<string, string>; body: unknown } {
-  const prompt = "Reply with exactly one word: pong";
+  const prompt =
+    process.env.TOLLGATE_E2E_WASTEFUL === "1"
+      ? wastefulPrompt()
+      : "Reply with exactly one word: pong";
   if (provider === "anthropic") {
     return {
       path: "/v1/messages",
@@ -88,6 +98,9 @@ async function runOnce(base: string, stream: boolean) {
     totalMs: Date.now() - t0,
     bytes,
     text: collected.join(""),
+    estTokens: res.headers.get("x-tollgate-input-tokens-est"),
+    estAccuracy: res.headers.get("x-tollgate-input-accuracy"),
+    estCost: res.headers.get("x-tollgate-est-input-cost-usd"),
   };
 }
 
@@ -144,6 +157,7 @@ async function main(): Promise<void> {
       console.log(`  time to first byte : ${r.firstByteMs ?? "n/a"} ms`);
       console.log(`  total time         : ${r.totalMs} ms`);
       console.log(`  bytes relayed      : ${r.bytes}`);
+      console.log(`  pre-flight estimate: ${r.estTokens} input tokens (${r.estAccuracy}), est input cost $${r.estCost}`);
       if (ok) {
         console.log(`  model reply        : ${JSON.stringify(summarizeText(r.contentType, r.text))}`);
       } else {
@@ -160,24 +174,48 @@ async function main(): Promise<void> {
   await new Promise((r) => setTimeout(r, 100));
   const rows = repo.recentRequests();
   console.log(`── captured to SQLite (${rows.length} rows) ───────────`);
+  let withinBand = 0;
+  let comparable = 0;
   for (const row of rows) {
+    const est = row.inputTokensEst;
+    const act = row.inputTokensActual;
+    let deltaStr = "";
+    if (est != null && act != null && act > 0) {
+      comparable++;
+      const delta = (est - act) / act;
+      if (Math.abs(delta) <= 0.1) withinBand++;
+      deltaStr = `  est=${est} (Δ ${(delta * 100).toFixed(1)}%)`;
+    }
     console.log(
-      `  ${row.provider}/${row.model}  in=${row.inputTokensActual ?? "?"} out=${row.outputTokensActual ?? "?"} ` +
-        `upstream=${row.upstreamMs}ms  hash=${row.contentHash?.slice(0, 12)}…  raw_logged=${row.rawLogged}`,
+      `  ${row.provider}/${row.model}  in=${act ?? "?"} out=${row.outputTokensActual ?? "?"}${deltaStr} ` +
+        `cost=$${(((row.estInputCost ?? 0) + (row.estOutputCost ?? 0)) || 0).toFixed(6)} ` +
+        `upstream=${row.upstreamMs}ms  raw_logged=${row.rawLogged}`,
     );
+    for (const f of repo.getFindings(row.id)) {
+      console.log(`      ⚠ [${f.rule}/${f.severity}] ~${f.tokensWastedEst} tok — ${f.message}`);
+    }
   }
   console.log("");
 
   const captured = rows.length;
   const withUsage = rows.filter((r) => r.inputTokensActual != null && r.outputTokensActual != null).length;
   console.log("── verdict ───────────────────────────────");
-  console.log(`  requests captured        : ${captured}/2 ${captured === 2 ? "✓" : "✗"}`);
-  console.log(`  usage captured (in+out)  : ${withUsage}/2 ${withUsage === 2 ? "✓" : "✗"}`);
-  console.log(`  successful responses     : ${2 - failures}/2 ${failures === 0 ? "✓" : "✗"}`);
+  console.log(`  requests captured            : ${captured}/2 ${captured === 2 ? "✓" : "✗"}`);
+  console.log(`  usage captured (in+out)      : ${withUsage}/2 ${withUsage === 2 ? "✓" : "✗"}`);
+  console.log(`  successful responses         : ${2 - failures}/2 ${failures === 0 ? "✓" : "✗"}`);
+  // The ±10% band is documented for natural English; the synthetic wasteful
+  // prompt uses pathological token soup and is not a fair input for that check.
+  const wasteful = process.env.TOLLGATE_E2E_WASTEFUL === "1";
+  const bandOk = wasteful || (comparable > 0 && withinBand === comparable);
+  console.log(
+    `  estimate within ±10%         : ${withinBand}/${comparable} ${
+      wasteful ? "(n/a — synthetic prompt)" : comparable > 0 && withinBand === comparable ? "✓" : "✗"
+    }`,
+  );
 
   await app.close();
   rmSync(tmp, { recursive: true, force: true });
-  process.exit(failures === 0 && captured === 2 && withUsage === 2 ? 0 : 1);
+  process.exit(failures === 0 && captured === 2 && withUsage === 2 && bandOk ? 0 : 1);
 }
 
 main().catch((err) => {
