@@ -14,7 +14,8 @@ CREATE TABLE IF NOT EXISTS requests (
   est_output_cost REAL,
   upstream_ms INTEGER,
   content_hash TEXT,
-  raw_logged INTEGER NOT NULL DEFAULT 0
+  raw_logged INTEGER NOT NULL DEFAULT 0,
+  request_type TEXT
 );
 
 CREATE TABLE IF NOT EXISTS findings (

@@ -10,7 +10,7 @@ See [`tollgate-prd.md`](./tollgate-prd.md) for the product spec and
 
 ## Status
 
-**M1 — Transparent proxy** ✅ &nbsp;·&nbsp; **M2 — Pre-flight estimate + budgets** ✅ &nbsp;·&nbsp; **M3 — Lint engine + cache detector** ✅ (in progress toward v1)
+**M1 — Transparent proxy** ✅ &nbsp;·&nbsp; **M2 — Pre-flight estimate + budgets** ✅ &nbsp;·&nbsp; **M3 — Lint engine + cache detector** ✅ &nbsp;·&nbsp; **M4 — Dashboard + receipts** ✅ (in progress toward v1)
 
 Tollgate exposes provider-compatible endpoints, forwards requests to the real
 upstream with auth passthrough, streams responses through chunk-by-chunk, and
@@ -32,7 +32,13 @@ detector** that flags when a request shares a long prefix with a recent one —
 all local, no model calls. Findings are persisted per request and surfaced via
 `x-tollgate-lint-findings` headers.
 
-Roadmap: M4 dashboard + receipts → M5 polish.
+M4 adds a read-only **local web dashboard** at `http://127.0.0.1:PORT/_tollgate`
+(spend over time; breakdowns by model, route, and request type; recent requests
+with their findings) and a per-response **receipt** endpoint at
+`/_tollgate/receipt/:id` (input vs. output cost split, top cost driver,
+findings). The page is fully self-contained and works offline.
+
+Roadmap: M5 polish (one-command install, config docs, calibration notes).
 
 ## Requirements
 
