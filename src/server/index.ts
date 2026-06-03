@@ -5,6 +5,7 @@ import { createProxyHandler } from "./proxy.js";
 import { Pricing } from "../pricing/index.js";
 import { BudgetTracker } from "../budget/tracker.js";
 import { LintEngine } from "../lint/engine.js";
+import { registerDashboard } from "../ui/web/dashboard.js";
 
 export type TollgateServer = {
   app: FastifyInstance;
@@ -42,6 +43,9 @@ export function buildServer(config: Config, opts: { logger?: boolean } = {}): To
 
   // Liveness probe (not a provider route).
   app.get("/_tollgate/health", async () => ({ status: "ok", routes: config.routes.length }));
+
+  // Read-only dashboard + receipt endpoints (M4).
+  registerDashboard(app, repo);
 
   app.addHook("onClose", async () => {
     repo.close();

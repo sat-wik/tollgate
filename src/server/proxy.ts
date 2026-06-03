@@ -6,6 +6,7 @@ import type { RouteConfig } from "../config/index.js";
 import type { Repo } from "../store/repo.js";
 import { parseRequest } from "../adapters/index.js";
 import { contentHash } from "../util/hash.js";
+import { classifyRequestType } from "../util/classify.js";
 import { extractUsage } from "./usage.js";
 import { getTokenizer, countTextTokens } from "../tokenizer/index.js";
 import type { Pricing } from "../pricing/index.js";
@@ -203,6 +204,7 @@ export function createProxyHandler(route: RouteConfig, deps: ProxyDeps) {
           upstreamMs,
           contentHash: contentHash(normalized),
           rawLogged: route.rawLog,
+          requestType: classifyRequestType(normalized, inputForCost),
         });
         repo.insertFindings(requestId, findings);
       } catch (err) {
