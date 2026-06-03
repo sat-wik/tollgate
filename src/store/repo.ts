@@ -2,6 +2,7 @@ import { readFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import { SCHEMA_PATH } from "../config/index.js";
+import type { Finding, Severity } from "../lint/rules/types.js";
 
 export type RequestRecord = {
   id: string;
@@ -63,6 +64,42 @@ export class Repo {
       .prepare(`SELECT * FROM requests ORDER BY ts DESC LIMIT ?`)
       .all(limit) as Record<string, unknown>[];
     return rows.map(rowToRecord);
+  }
+
+  insertFindings(requestId: string, findings: Finding[]): void {
+    if (!findings.length) return;
+    const stmt = this.db.prepare(
+      `INSERT INTO findings (request_id, rule, severity, tokens_wasted_est, message, location_json)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    const tx = this.db.transaction((items: Finding[]) => {
+      for (const f of items) {
+        stmt.run(
+          requestId,
+          f.rule,
+          f.severity,
+          Math.round(f.tokensWastedEst),
+          f.message,
+          f.location ? JSON.stringify(f.location) : null,
+        );
+      }
+    });
+    tx(findings);
+  }
+
+  getFindings(requestId: string): Finding[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM findings WHERE request_id = ?`)
+      .all(requestId) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      rule: row.rule as string,
+      severity: row.severity as Severity,
+      tokensWastedEst: row.tokens_wasted_est as number,
+      message: row.message as string,
+      location: row.location_json
+        ? (JSON.parse(row.location_json as string) as Finding["location"])
+        : undefined,
+    }));
   }
 
   /** Summed token + cost totals for requests at or after `sinceTs`. */

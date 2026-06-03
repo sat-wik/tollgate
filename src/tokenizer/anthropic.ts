@@ -1,7 +1,7 @@
 import { get_encoding, type Tiktoken } from "tiktoken";
 import type { NormalizedRequest } from "../adapters/types.js";
 import type { Tokenizer } from "./index.js";
-import { estimateImageTokens } from "./index.js";
+import { estimateImageTokens, estimateDocumentTokens } from "./index.js";
 
 /**
  * Anthropic does not ship a public local tokenizer, so we approximate. The
@@ -49,7 +49,7 @@ export class AnthropicTokenizer implements Tokenizer {
             textTokens += estimateImageTokens(part.bytes);
             break;
           case "document":
-            textTokens += estimateImageTokens(part.bytes);
+            textTokens += estimateDocumentTokens(part.bytes, part.pages);
             break;
         }
       }
