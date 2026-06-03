@@ -306,5 +306,7 @@ If a task implies any of these, stop and ask:
 
 Append-only. Every architectural decision that’s non-obvious goes here with a date and one-line rationale.
 
-- *YYYY-MM-DD* — Chose TS/Node over Go for v1: streaming + tokenizer ergonomics + author stack; Go is a viable v2 rewrite.
-- *YYYY-MM-DD* — Allowed the single mutation of injecting `stream_options.include_usage` for OpenAI streaming, opt-out via config. Required to get token counts without a second request.
+- *2026-06-03* — Chose TS/Node over Go for v1: streaming + tokenizer ergonomics + author stack; Go is a viable v2 rewrite.
+- *2026-06-03* — Allowed the single mutation of injecting `stream_options.include_usage` for OpenAI streaming, opt-out via config. Required to get token counts without a second request.
+- *2026-06-03* — M1 forwarding uses the captured raw request body (`rawBody`) piped through Node's `http`/`https` with `reply.hijack()`, guaranteeing byte-equivalence rather than re-serializing from `NormalizedRequest`. Adapters are parse-only for now; provider-body serialization is deferred until a milestone needs it.
+- *2026-06-03* — Usage capture reads from a private copy of the response (decompressed if needed) and never alters the bytes streamed to the client. Streaming stays live; the copy is parsed only at stream end. Accepted bounded memory for the copy in v1.
