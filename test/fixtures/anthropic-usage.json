@@ -1,0 +1,16 @@
+{
+  "_note": "Real usage.input_tokens captured from claude-haiku-4-5 via the live Anthropic Messages API on 2026-06-03 (max_tokens=1, single user text message). Ground truth for validating the Anthropic tokenizer's documented ±10% accuracy band (M2 DoD). Contains token counts only — no secrets, no prompt content beyond these benign calibration strings.",
+  "model": "claude-haiku-4-5",
+  "cases": [
+    { "text": "Hi", "actualInputTokens": 8 },
+    { "text": "Reply with exactly one word: pong", "actualInputTokens": 15 },
+    { "text": "The quick brown fox jumps over the lazy dog near the riverbank at dawn.", "actualInputTokens": 24 },
+    { "text": "TypeScript is a strongly typed programming language that builds on JavaScript, giving you better tooling at any scale. It adds static type definitions, which can be used to describe the shape of an object, providing better documentation and allowing TypeScript to validate that your code is working correctly.", "actualInputTokens": 63 }
+  ],
+  "repeatedCase": {
+    "_build": "the sentence below repeated 12 times",
+    "sentence": "In a distant land beyond the mountains, there lived a community of engineers who measured every token that passed through their systems. ",
+    "repeat": 12,
+    "actualInputTokens": 296
+  }
+}

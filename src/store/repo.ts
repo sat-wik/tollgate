@@ -65,6 +65,19 @@ export class Repo {
     return rows.map(rowToRecord);
   }
 
+  /** Summed token + cost totals for requests at or after `sinceTs`. */
+  totalsSince(sinceTs: number): { tokens: number; cost: number } {
+    const row = this.db
+      .prepare(
+        `SELECT
+           COALESCE(SUM(COALESCE(input_tokens_actual, 0) + COALESCE(output_tokens_actual, 0)), 0) AS tokens,
+           COALESCE(SUM(COALESCE(est_input_cost, 0) + COALESCE(est_output_cost, 0)), 0) AS cost
+         FROM requests WHERE ts >= ?`,
+      )
+      .get(sinceTs) as { tokens: number; cost: number };
+    return { tokens: row.tokens, cost: row.cost };
+  }
+
   close(): void {
     this.db.close();
   }

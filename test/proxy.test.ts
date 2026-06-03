@@ -29,6 +29,12 @@ function testConfig(): Config {
         injectUsage: true,
       },
     ],
+    budget: { thresholds: [0.8, 1.0], block: false },
+    // Give the mock models a price so cost columns are exercised.
+    pricingOverrides: {
+      "anthropic/claude-test": { inputPerMTok: 1.0, outputPerMTok: 5.0 },
+      "openai/gpt-test": { inputPerMTok: 2.5, outputPerMTok: 10.0 },
+    },
   };
 }
 
@@ -88,6 +94,33 @@ describe("M1 transparent proxy", () => {
     expect(rows[0].contentHash).toMatch(/^[0-9a-f]{64}$/);
     expect(rows[0].rawLogged).toBe(false);
     expect(rows[0].upstreamMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("persists the pre-flight token estimate and computed cost (M2)", async () => {
+    const res = await inject("/v1/messages", {
+      model: "claude-test",
+      messages: [{ role: "user", content: "Estimate my tokens please, this is a longer message." }],
+    });
+    // Pre-flight estimate is surfaced as response headers.
+    expect(Number(res.headers["x-tollgate-input-tokens-est"])).toBeGreaterThan(0);
+    expect(res.headers["x-tollgate-input-accuracy"]).toBe("approx");
+
+    const row = server.repo.recentRequests()[0];
+    expect(row.inputTokensEst).toBeGreaterThan(0);
+    // Cost computed from actual usage (in=42, out=7) at 1.0/5.0 per MTok.
+    expect(row.estInputCost).toBeCloseTo((42 / 1_000_000) * 1.0, 9);
+    expect(row.estOutputCost).toBeCloseTo((7 / 1_000_000) * 5.0, 9);
+  });
+
+  it("reports estimated cost as unknown for an unpriced model", async () => {
+    const res = await inject("/v1/messages", {
+      model: "claude-unpriced-model",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(res.headers["x-tollgate-est-input-cost-usd"]).toBe("unknown");
+    const row = server.repo.recentRequests()[0];
+    expect(row.estInputCost).toBeNull();
+    expect(row.estOutputCost).toBeNull();
   });
 
   it("captures usage from a streamed Anthropic response", async () => {
