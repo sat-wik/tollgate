@@ -88,6 +88,9 @@ async function runOnce(base: string, stream: boolean) {
     totalMs: Date.now() - t0,
     bytes,
     text: collected.join(""),
+    estTokens: res.headers.get("x-tollgate-input-tokens-est"),
+    estAccuracy: res.headers.get("x-tollgate-input-accuracy"),
+    estCost: res.headers.get("x-tollgate-est-input-cost-usd"),
   };
 }
 
@@ -144,6 +147,7 @@ async function main(): Promise<void> {
       console.log(`  time to first byte : ${r.firstByteMs ?? "n/a"} ms`);
       console.log(`  total time         : ${r.totalMs} ms`);
       console.log(`  bytes relayed      : ${r.bytes}`);
+      console.log(`  pre-flight estimate: ${r.estTokens} input tokens (${r.estAccuracy}), est input cost $${r.estCost}`);
       if (ok) {
         console.log(`  model reply        : ${JSON.stringify(summarizeText(r.contentType, r.text))}`);
       } else {
@@ -160,10 +164,22 @@ async function main(): Promise<void> {
   await new Promise((r) => setTimeout(r, 100));
   const rows = repo.recentRequests();
   console.log(`── captured to SQLite (${rows.length} rows) ───────────`);
+  let withinBand = 0;
+  let comparable = 0;
   for (const row of rows) {
+    const est = row.inputTokensEst;
+    const act = row.inputTokensActual;
+    let deltaStr = "";
+    if (est != null && act != null && act > 0) {
+      comparable++;
+      const delta = (est - act) / act;
+      if (Math.abs(delta) <= 0.1) withinBand++;
+      deltaStr = `  est=${est} (Δ ${(delta * 100).toFixed(1)}%)`;
+    }
     console.log(
-      `  ${row.provider}/${row.model}  in=${row.inputTokensActual ?? "?"} out=${row.outputTokensActual ?? "?"} ` +
-        `upstream=${row.upstreamMs}ms  hash=${row.contentHash?.slice(0, 12)}…  raw_logged=${row.rawLogged}`,
+      `  ${row.provider}/${row.model}  in=${act ?? "?"} out=${row.outputTokensActual ?? "?"}${deltaStr} ` +
+        `cost=$${(((row.estInputCost ?? 0) + (row.estOutputCost ?? 0)) || 0).toFixed(6)} ` +
+        `upstream=${row.upstreamMs}ms  raw_logged=${row.rawLogged}`,
     );
   }
   console.log("");
@@ -171,9 +187,12 @@ async function main(): Promise<void> {
   const captured = rows.length;
   const withUsage = rows.filter((r) => r.inputTokensActual != null && r.outputTokensActual != null).length;
   console.log("── verdict ───────────────────────────────");
-  console.log(`  requests captured        : ${captured}/2 ${captured === 2 ? "✓" : "✗"}`);
-  console.log(`  usage captured (in+out)  : ${withUsage}/2 ${withUsage === 2 ? "✓" : "✗"}`);
-  console.log(`  successful responses     : ${2 - failures}/2 ${failures === 0 ? "✓" : "✗"}`);
+  console.log(`  requests captured            : ${captured}/2 ${captured === 2 ? "✓" : "✗"}`);
+  console.log(`  usage captured (in+out)      : ${withUsage}/2 ${withUsage === 2 ? "✓" : "✗"}`);
+  console.log(`  successful responses         : ${2 - failures}/2 ${failures === 0 ? "✓" : "✗"}`);
+  console.log(
+    `  estimate within ±10%         : ${withinBand}/${comparable} ${comparable > 0 && withinBand === comparable ? "✓" : "✗"}`,
+  );
 
   await app.close();
   rmSync(tmp, { recursive: true, force: true });

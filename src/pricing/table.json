@@ -1,0 +1,44 @@
+{
+  "_meta": {
+    "note": "Prices are USD per million tokens. Per CLAUDE.md §6.3 every entry is cited inline (JSON has no comments, so citations are the per-entry `source`/`asOf` fields). Do not guess: models absent here price as 'unknown' and must be surfaced as such, not fabricated. Verify against the provider pricing page before relying on a value.",
+    "currency": "USD",
+    "cachedInputNote": "cachedInputPerMTok is the per-MTok rate for cache-read (hit) input tokens, used by the M3 cache detector."
+  },
+
+  "openai/gpt-4o": {
+    "inputPerMTok": 2.5,
+    "outputPerMTok": 10.0,
+    "cachedInputPerMTok": 1.25,
+    "source": "https://openai.com/api/pricing/",
+    "asOf": "2026-06-03"
+  },
+  "openai/gpt-4o-mini": {
+    "inputPerMTok": 0.15,
+    "outputPerMTok": 0.6,
+    "cachedInputPerMTok": 0.075,
+    "source": "https://openai.com/api/pricing/",
+    "asOf": "2026-06-03"
+  },
+
+  "anthropic/claude-opus-4-1": {
+    "inputPerMTok": 15.0,
+    "outputPerMTok": 75.0,
+    "cachedInputPerMTok": 1.5,
+    "source": "https://www.anthropic.com/pricing",
+    "asOf": "2026-06-03"
+  },
+  "anthropic/claude-sonnet-4-5": {
+    "inputPerMTok": 3.0,
+    "outputPerMTok": 15.0,
+    "cachedInputPerMTok": 0.3,
+    "source": "https://www.anthropic.com/pricing",
+    "asOf": "2026-06-03"
+  },
+  "anthropic/claude-haiku-4-5": {
+    "inputPerMTok": 1.0,
+    "outputPerMTok": 5.0,
+    "cachedInputPerMTok": 0.1,
+    "source": "https://www.anthropic.com/pricing",
+    "asOf": "2026-06-03"
+  }
+}

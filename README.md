@@ -10,7 +10,7 @@ See [`tollgate-prd.md`](./tollgate-prd.md) for the product spec and
 
 ## Status
 
-**M1 — Transparent proxy** ✅ (in progress toward v1)
+**M1 — Transparent proxy** ✅ &nbsp;·&nbsp; **M2 — Pre-flight estimate + budgets** ✅ (in progress toward v1)
 
 Tollgate exposes provider-compatible endpoints, forwards requests to the real
 upstream with auth passthrough, streams responses through chunk-by-chunk, and
@@ -19,8 +19,14 @@ local SQLite store. Request/response bodies are forwarded byte-for-byte; the
 only sanctioned mutation is injecting `stream_options.include_usage` on
 streaming OpenAI requests (opt-out via config).
 
-Roadmap: M2 pre-flight estimate + budgets → M3 lint engine + cache detector →
-M4 dashboard + receipts → M5 polish.
+M2 adds local **pre-flight token estimation** before each request is forwarded
+(`tiktoken` for OpenAI — exact for text; a calibrated o200k-based approximation
+for Anthropic — within a documented ±10% band), a **pricing table** with cost
+estimation, and **per-session/daily budgets** with threshold warnings (80% /
+100%; v1 warns but does not block). The estimate is surfaced as `x-tollgate-*`
+response headers and persisted alongside the provider's actual usage.
+
+Roadmap: M3 lint engine + cache detector → M4 dashboard + receipts → M5 polish.
 
 ## Requirements
 
