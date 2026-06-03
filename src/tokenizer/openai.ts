@@ -1,7 +1,7 @@
 import { encoding_for_model, get_encoding, type Tiktoken, type TiktokenModel } from "tiktoken";
 import type { NormalizedRequest } from "../adapters/types.js";
 import type { Tokenizer } from "./index.js";
-import { estimateImageTokens } from "./index.js";
+import { estimateImageTokens, estimateDocumentTokens } from "./index.js";
 
 // Chat-completion token accounting follows OpenAI's documented formula: each
 // message costs a fixed framing overhead plus the encoded role and content, and
@@ -51,7 +51,7 @@ export class OpenAITokenizer implements Tokenizer {
             approx = true;
             break;
           case "document":
-            tokens += estimateImageTokens(part.bytes);
+            tokens += estimateDocumentTokens(part.bytes, part.pages);
             approx = true;
             break;
         }

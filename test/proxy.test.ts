@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig, type Config } from "../src/config/index.js";
 import { buildServer, type TollgateServer } from "../src/server/index.js";
+import { DEFAULT_LINT_CONFIG } from "../src/lint/rules/types.js";
+import { DEFAULT_CACHE_CONFIG } from "../src/cache/detector.js";
 import { startMockUpstream, type MockUpstream } from "./upstream-mock.js";
 
 let mock: MockUpstream;
@@ -35,6 +37,10 @@ function testConfig(): Config {
       "anthropic/claude-test": { inputPerMTok: 1.0, outputPerMTok: 5.0 },
       "openai/gpt-test": { inputPerMTok: 2.5, outputPerMTok: 10.0 },
     },
+    lint: DEFAULT_LINT_CONFIG,
+    // Lower the prefix threshold so the caching path is exercisable with a
+    // modest prompt (default 1024 tokens would need a very large fixture).
+    cache: { ...DEFAULT_CACHE_CONFIG, minPrefixTokens: 50 },
   };
 }
 
@@ -110,6 +116,34 @@ describe("M1 transparent proxy", () => {
     // Cost computed from actual usage (in=42, out=7) at 1.0/5.0 per MTok.
     expect(row.estInputCost).toBeCloseTo((42 / 1_000_000) * 1.0, 9);
     expect(row.estOutputCost).toBeCloseTo((7 / 1_000_000) * 5.0, 9);
+  });
+
+  it("runs the lint engine and persists findings for a wasteful prompt (M3)", async () => {
+    const big = Array.from({ length: 6000 }, (_, i) => `w${i % 97}`).join(" ");
+    const res = await inject("/v1/messages", {
+      model: "claude-test",
+      messages: [{ role: "user", content: big }],
+    });
+    expect(Number(res.headers["x-tollgate-lint-findings"])).toBeGreaterThanOrEqual(1);
+    expect(Number(res.headers["x-tollgate-tokens-wasted-est"])).toBeGreaterThan(0);
+
+    const row = server.repo.recentRequests()[0];
+    const findings = server.repo.getFindings(row.id);
+    expect(findings.some((f) => f.rule === "oversized-paste")).toBe(true);
+  });
+
+  it("detects a caching opportunity on a repeated prefix (M3)", async () => {
+    const system = Array.from({ length: 120 }, (_, i) => `ctx${i % 40}`).join(" ");
+    const body = (q: string) => ({ model: "claude-test", system, messages: [{ role: "user", content: q }] });
+
+    await inject("/v1/messages", body("first question")); // seeds the window
+    await inject("/v1/messages", body("second question")); // shares the prefix
+
+    const rows = server.repo.recentRequests();
+    const latest = server.repo.getFindings(rows[0].id);
+    const cacheFinding = latest.find((f) => f.rule === "cache-opportunity");
+    expect(cacheFinding).toBeDefined();
+    expect(cacheFinding!.tokensWastedEst).toBeGreaterThanOrEqual(50);
   });
 
   it("reports estimated cost as unknown for an unpriced model", async () => {

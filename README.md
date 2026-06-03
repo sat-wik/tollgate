@@ -10,7 +10,7 @@ See [`tollgate-prd.md`](./tollgate-prd.md) for the product spec and
 
 ## Status
 
-**M1 — Transparent proxy** ✅ &nbsp;·&nbsp; **M2 — Pre-flight estimate + budgets** ✅ (in progress toward v1)
+**M1 — Transparent proxy** ✅ &nbsp;·&nbsp; **M2 — Pre-flight estimate + budgets** ✅ &nbsp;·&nbsp; **M3 — Lint engine + cache detector** ✅ (in progress toward v1)
 
 Tollgate exposes provider-compatible endpoints, forwards requests to the real
 upstream with auth passthrough, streams responses through chunk-by-chunk, and
@@ -26,7 +26,13 @@ estimation, and **per-session/daily budgets** with threshold warnings (80% /
 100%; v1 warns but does not block). The estimate is surfaced as `x-tollgate-*`
 response headers and persisted alongside the provider's actual usage.
 
-Roadmap: M3 lint engine + cache detector → M4 dashboard + receipts → M5 polish.
+M3 adds a deterministic **context-hygiene lint** (duplicate blocks, oversized
+pastes, multimodal cost surprises, stale history) and a **caching-opportunity
+detector** that flags when a request shares a long prefix with a recent one —
+all local, no model calls. Findings are persisted per request and surfaced via
+`x-tollgate-lint-findings` headers.
+
+Roadmap: M4 dashboard + receipts → M5 polish.
 
 ## Requirements
 
