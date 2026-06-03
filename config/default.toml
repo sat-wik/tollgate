@@ -1,0 +1,35 @@
+# Tollgate default configuration.
+# User config lives at ~/.tollgate/config.toml and is merged over these defaults.
+# Every option here is documented; security-relevant options are called out.
+
+# Port the local proxy + dashboard listen on.
+port = 8787
+
+# SQLite database location. "~" expands to the user's home directory.
+# Use ":memory:" for an ephemeral store (tests).
+[storage]
+path = "~/.tollgate/tollgate.db"
+
+# --- Routes -------------------------------------------------------------------
+# Each route exposes a provider-compatible endpoint and forwards to an upstream.
+# Auth headers from the client are passed through to the upstream unchanged.
+
+[routes.anthropic]
+provider = "anthropic"
+path = "/v1/messages"
+upstream = "https://api.anthropic.com"
+label = "anthropic"
+# PRIVACY (CLAUDE.md §9): raw prompt/response bodies are NEVER stored unless this
+# is explicitly set to true. Default false. Only metadata + a content hash persist.
+raw_log = false
+
+[routes.openai]
+provider = "openai"
+path = "/v1/chat/completions"
+upstream = "https://api.openai.com"
+label = "openai"
+raw_log = false
+# The single sanctioned request-body mutation (CLAUDE.md §7): when a client makes
+# a streaming OpenAI request without stream_options.include_usage, we inject it so
+# token usage is reported in the final chunk. Opt out by setting this to false.
+inject_usage = true
