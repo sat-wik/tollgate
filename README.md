@@ -38,20 +38,24 @@ with their findings) and a per-response **receipt** endpoint at
 `/_tollgate/receipt/:id` (input vs. output cost split, top cost driver,
 findings). The page is fully self-contained and works offline.
 
-Roadmap: M5 polish (one-command install, config docs, calibration notes).
+All five v1 milestones (M1–M5) are implemented.
 
 ## Requirements
 
 - Node.js >= 20
 
-## Install & run
+## Quick start
 
 ```bash
 npm install
-npm start          # starts the proxy on http://127.0.0.1:8787
+npm run build           # compile to dist/ and copy runtime assets
+npx tollgate init       # scaffold ~/.tollgate/config.toml + print setup steps
+npx tollgate            # start the proxy on http://127.0.0.1:8787
 ```
 
-Point your tools at the proxy:
+`tollgate init` is idempotent — it never overwrites an existing config.
+
+Then point your tools at the proxy:
 
 ```bash
 # Claude Code / Anthropic SDK
@@ -61,19 +65,36 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
 ```
 
+…and open the dashboard at <http://127.0.0.1:8787/_tollgate>.
+
+> Running from source without building? Use `npx tsx src/index.ts init` and
+> `npm start`.
+
 ## Configuration
 
-Defaults live in [`config/default.toml`](./config/default.toml). User overrides
-go in `~/.tollgate/config.toml` and are merged on top. Options include the
-listen port, per-route upstreams and labels, the `raw_log` privacy opt-in
-(default off — only metadata + content hashes are stored), and the OpenAI
-`inject_usage` toggle.
+User overrides go in `~/.tollgate/config.toml`, merged over the bundled
+[`config/default.toml`](./config/default.toml). The SQLite store defaults to
+`~/.tollgate/tollgate.db`.
 
-The SQLite store defaults to `~/.tollgate/tollgate.db`.
+See the **[full configuration reference](./docs/configuration.md)** for every
+option, default, and security note (auth passthrough, the `raw_log` privacy
+opt-in, budgets, pricing overrides, lint/cache thresholds, and response headers).
+
+## Accuracy & privacy
+
+- Input tokens are counted locally before forwarding — exact for OpenAI text,
+  and a calibrated ±10% approximation for Anthropic. See the
+  **[Anthropic token-accuracy note](./docs/anthropic-token-accuracy.md)**.
+- API keys pass straight through to the provider and are never stored. By
+  default only request metadata + content hashes are persisted — never raw
+  prompts (raw logging is a per-route opt-in).
+- All analysis (tokenizing, pricing, lint, caching, dashboard) runs offline;
+  the only outbound traffic is your forwarded request.
 
 ## Development
 
 ```bash
 npm run typecheck   # tsc --noEmit
 npm test            # vitest (no live provider calls; uses a local mock upstream)
+npm run build       # emit dist/ (used by the `tollgate` bin)
 ```
