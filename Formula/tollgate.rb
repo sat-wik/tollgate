@@ -4,8 +4,8 @@ class Tollgate < Formula
 
   desc "Local capture proxy for LLM API traffic, with cost attribution"
   homepage "https://github.com/sat-wik/tollgate"
-  url "https://files.pythonhosted.org/packages/source/t/tollgate-proxy/tollgate-proxy-0.3.0.tar.gz"
-  sha256 "PUBLISH_TO_PYPI_THEN_REGENERATE"
+  url "https://files.pythonhosted.org/packages/91/4f/e1322ceda02aba23be5ea506dfe1e738aa0628e9919390bd639b046c8feb/tollgate_proxy-0.3.0.tar.gz"
+  sha256 "06edf10f65a3400b08d68e7f8fed78acbba8ddd06c4ac38b80272ed84d637f76"
   license "MIT"
 
   depends_on "python@3.13"
