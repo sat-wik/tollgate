@@ -102,11 +102,23 @@ def test_fish_uses_its_own_syntax(tmp_path):
         ("/bin/zsh", ".zshrc"),
         ("/usr/local/bin/fish", "config.fish"),
         ("/bin/bash", ".bashrc"),
-        ("", ".zshrc"),
+        ("/usr/bin/some-unknown-shell", ".zshrc"),
     ],
 )
 def test_profile_path_follows_the_users_shell(shell_path, expected, tmp_path):
     assert shell.profile_path(shell_path, home=tmp_path).name == expected
+
+
+def test_profile_path_falls_back_when_no_shell_is_known(tmp_path, monkeypatch):
+    """Must not read the ambient $SHELL — CI runs bash and laptops run zsh, so
+    a test that inherits it passes locally and fails on Linux."""
+    monkeypatch.delenv("SHELL", raising=False)
+    assert shell.profile_path(home=tmp_path).name == ".zshrc"
+
+
+def test_profile_path_uses_the_environment_when_not_told(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHELL", "/bin/bash")
+    assert shell.profile_path(home=tmp_path).name == ".bashrc"
 
 
 def test_bash_prefers_a_profile_that_already_exists(tmp_path):
