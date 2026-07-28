@@ -56,7 +56,9 @@ def reprice(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         priced = dict(rec)
         priced["model"] = model
         priced["usage"] = usage
-        priced["cost_usd"] = cost_usd(model, usage)
+        priced["cost_usd"] = (
+            0.0 if rec.get("status", 200) != 200 else cost_usd(model, usage)
+        )
         out.append(priced)
     return out
 
@@ -91,6 +93,9 @@ def summarize(
             {
                 group_by: key,
                 "calls": len(recs),
+                # Failures keep their latency in the percentiles — a 30-second
+                # timeout before a 500 is exactly what a latency report is for.
+                "errors": sum(1 for r in recs if r.get("status", 200) != 200),
                 "input_tokens": sum(r["usage"]["input_tokens"] for r in recs),
                 "output_tokens": sum(r["usage"]["output_tokens"] for r in recs),
                 "cache_read_tokens": sum(r["usage"]["cache_read_tokens"] for r in recs),

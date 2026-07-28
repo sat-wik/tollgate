@@ -60,6 +60,15 @@ provider log is summable.
 the raw pair, so old logs re-price correctly when rates change — and a model
 with no known price reports `null`, never `$0.00`.
 
+**Failures are data.** Rate limits, overloads and 5xx are captured too, with
+their latency and a cost of zero. A log that silently omits the 429s is not an
+audit trail.
+
+**The proxy stays out of its own measurement.** Upstream connections are pooled
+for the process lifetime. Opening a client per request would put a fresh TCP
+and TLS handshake inside the window being timed, and a latency tool that
+inflates latency is worse than no tool.
+
 ## Supported endpoints
 
 | Endpoint | Upstream | Streaming |
@@ -131,14 +140,22 @@ sides of the diff are one complete body.
 
 ## Pricing table
 
-Rates are per million tokens, current as of **2026-07**, and cover the current
-Anthropic and OpenAI model lines. Cached tokens bill at a multiple of the input
-rate (Anthropic: 0.1x on read, 1.25x on a 5-minute write).
+Rates are per million tokens, standard tier, verified **2026-07-28** against
+both providers' published rates, covering the Claude 4.x/5 and GPT-4o/4.1/5.x
+lines plus the o-series.
 
-Two caveats worth knowing: Claude Sonnet 5 carries an introductory $2.00/$10.00
-rate through 2026-08-31 and the table lists the standard $3.00/$15.00; and
-OpenAI list prices move often, so verify them before treating a number as
-billing-grade. Both are one file away:
+Cached tokens bill at a multiple of the input rate, and the multiple is a
+property of the model rather than the provider — Anthropic reads at 0.1x and
+charges 1.25x to write; OpenAI charges nothing to write and reads at 0.1x on
+the gpt-5 line, 0.25x on gpt-4.1 and the o-series, 0.5x on gpt-4o.
+
+Three known gaps, all one file away from being fixed:
+
+- Claude Sonnet 5's introductory $2.00/$10.00 rate (through 2026-08-31) is not
+  applied; the table lists the standard $3.00/$15.00.
+- Anthropic cache writes are priced at the 5-minute rate. A 1-hour write costs
+  2x, and `cache_creation_input_tokens` doesn't distinguish the two.
+- Batch and Flex tiers (50% off) are not modelled.
 
 ```sh
 TOLLGATE_PRICING=~/prices.json tollgate report

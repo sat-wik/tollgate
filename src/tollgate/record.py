@@ -22,6 +22,12 @@ import hashlib
 import json
 import os
 import uuid
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows has no flock
+    fcntl = None  # type: ignore[assignment]
+
 from datetime import datetime, timezone
 from typing import Any
 
@@ -65,6 +71,10 @@ def build_record(
 ) -> dict[str, Any]:
     model = response_model(request, response)
     usage = normalize_usage(response)
+    # A rejected request is not billed, and pricing it as `None` would poison
+    # the total of every group it lands in. Note this under-counts a stream
+    # that failed partway: tokens already emitted do bill.
+    cost = 0.0 if status != 200 else cost_usd(model, usage)
     return {
         "id": uuid.uuid4().hex[:16],
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
@@ -76,7 +86,7 @@ def build_record(
         "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
         "ttft_ms": round(ttft_ms, 1) if ttft_ms is not None else None,
         "usage": usage,
-        "cost_usd": cost_usd(model, usage),
+        "cost_usd": cost,
         "prompt_sha": prompt_sha(request),
         "request_sha": request_sha(request),
         "request": request,
@@ -85,11 +95,32 @@ def build_record(
 
 
 def log_record(path: str, record: dict[str, Any]) -> None:
+    """Append one record as a single line, safely against other writers.
+
+    Two Tollgate processes can share a capture file, and records are large —
+    whole request and response bodies. On a local POSIX filesystem O_APPEND
+    already makes each append atomic (measured: 8 processes writing 2MB lines
+    interleave cleanly without this lock), so the flock is insurance for the
+    cases where that guarantee doesn't hold — NFS being the usual one, and
+    `~/.tollgate/captured.jsonl` on an NFS home directory is not exotic. It
+    costs one syscall pair per write. Platforms without flock proceed
+    unlocked.
+    """
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False) + "\n"
     with open(path, "a") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(line)
+            # Flush inside the lock — write() only fills the buffer, so
+            # unlocking first would let the actual syscall land unprotected.
+            f.flush()
+        finally:
+            if fcntl is not None:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def load_records(path: str) -> list[dict[str, Any]]:

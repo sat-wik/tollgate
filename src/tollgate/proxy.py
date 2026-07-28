@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Iterator
 
 import httpx
@@ -121,12 +122,41 @@ ACCUMULATORS = {
 }
 
 
+def _error_body(raw: str) -> dict[str, Any]:
+    """Wrap an upstream failure so it lands in the log as a record, not a gap.
+
+    Rate limits, overloads, and 5xx are exactly the events you want to see in a
+    latency report, and dropping them makes the log quietly incomplete.
+    """
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    return {"error": {"message": raw[:2000]}}
+
+
 # -- the proxy app -----------------------------------------------------------
 
 
 def create_app(capture_path: str | None = None) -> FastAPI:
     capture_path = capture_path or default_capture_path()
-    app = FastAPI(title="Tollgate", docs_url=None, redoc_url=None)
+    state: dict[str, httpx.AsyncClient] = {}
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # One pooled client for the process lifetime. Opening a client per
+        # request would put a fresh TCP and TLS handshake inside the window
+        # this proxy is measuring, overstating provider latency by the
+        # handshake on every single call.
+        state["client"] = httpx.AsyncClient(timeout=600.0)
+        try:
+            yield
+        finally:
+            await state.pop("client").aclose()
+
+    app = FastAPI(title="Tollgate", docs_url=None, redoc_url=None, lifespan=lifespan)
 
     async def proxy(request: Request, endpoint: str):
         body = await request.body()
@@ -138,7 +168,7 @@ def create_app(capture_path: str | None = None) -> FastAPI:
             k: v for k, v in request.headers.items() if k.lower() not in _HOP_HEADERS
         }
         url = UPSTREAMS[endpoint] + endpoint
-        client = httpx.AsyncClient(timeout=600.0)
+        client = state["client"]
         started = time.perf_counter()
 
         if req_json.get("stream"):
@@ -158,21 +188,25 @@ def create_app(capture_path: str | None = None) -> FastAPI:
                 finally:
                     elapsed = (time.perf_counter() - started) * 1000
                     await upstream.__aexit__(None, None, None)
-                    await client.aclose()
-                    if resp.status_code == 200:
-                        raw = b"".join(captured).decode("utf-8", "replace")
-                        log_record(
-                            capture_path,
-                            build_record(
-                                endpoint,
-                                req_json,
-                                ACCUMULATORS[endpoint](raw),
-                                status=resp.status_code,
-                                stream=True,
-                                latency_ms=elapsed,
-                                ttft_ms=ttft,
-                            ),
-                        )
+                    raw = b"".join(captured).decode("utf-8", "replace")
+                    # A failed stream carries a JSON error body, not SSE.
+                    reconstructed = (
+                        ACCUMULATORS[endpoint](raw)
+                        if resp.status_code == 200
+                        else _error_body(raw)
+                    )
+                    log_record(
+                        capture_path,
+                        build_record(
+                            endpoint,
+                            req_json,
+                            reconstructed,
+                            status=resp.status_code,
+                            stream=True,
+                            latency_ms=elapsed,
+                            ttft_ms=ttft,
+                        ),
+                    )
 
             return StreamingResponse(
                 relay(),
@@ -180,27 +214,23 @@ def create_app(capture_path: str | None = None) -> FastAPI:
                 media_type=resp.headers.get("content-type", "text/event-stream"),
             )
 
-        try:
-            resp = await client.post(url, content=body, headers=headers)
-        finally:
-            await client.aclose()
+        resp = await client.post(url, content=body, headers=headers)
         elapsed = (time.perf_counter() - started) * 1000
-        if resp.status_code == 200:
-            try:
-                resp_json = resp.json()
-            except json.JSONDecodeError:
-                resp_json = None
-            if resp_json is not None:
-                log_record(
-                    capture_path,
-                    build_record(
-                        endpoint,
-                        req_json,
-                        resp_json,
-                        status=resp.status_code,
-                        latency_ms=elapsed,
-                    ),
-                )
+        try:
+            resp_json = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            resp_json = _error_body(resp.text) if resp.status_code != 200 else None
+        if resp_json is not None:
+            log_record(
+                capture_path,
+                build_record(
+                    endpoint,
+                    req_json,
+                    resp_json,
+                    status=resp.status_code,
+                    latency_ms=elapsed,
+                ),
+            )
         return Response(
             content=resp.content,
             status_code=resp.status_code,

@@ -27,12 +27,21 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-#: Prices are per million tokens, current as of 2026-07.
-#: Anthropic rates are first-party API list prices; Bedrock/Vertex are
-#: partner-operated and differ. Claude Sonnet 5 carries an introductory
-#: $2.00/$10.00 rate through 2026-08-31 — the table lists the standard rate, so
-#: override it if you want the discount reflected.
-PRICES_AS_OF = "2026-07"
+#: Prices are per million tokens, standard tier, verified 2026-07-28 against
+#: the providers' published rates.
+#:
+#: Three assumptions worth knowing, all overridable:
+#:  - Anthropic rates are first-party API list prices; Bedrock and Vertex are
+#:    partner-operated and differ.
+#:  - Claude Sonnet 5 carries an introductory $2.00/$10.00 rate through
+#:    2026-08-31; the table lists the standard $3.00/$15.00.
+#:  - Anthropic cache writes are billed at the 5-minute rate (1.25x). A 1-hour
+#:    write costs 2x, and `cache_creation_input_tokens` does not distinguish
+#:    them, so a 1h-TTL workload is under-costed on that component.
+#:
+#: Batch and Flex tiers (50% off both providers) are not modelled — a batched
+#: workload should override the table.
+PRICES_AS_OF = "2026-07-28"
 
 _ANTHROPIC = {
     "claude-fable-5": (10.0, 50.0),
@@ -49,18 +58,35 @@ _ANTHROPIC = {
     "claude-haiku-4-5": (1.0, 5.0),
 }
 
-#: OpenAI list prices change often and are not tracked as closely here as the
-#: Anthropic table. Verify against openai.com/api/pricing for billing-grade
-#: numbers, or override via TOLLGATE_PRICING.
+#: (input, output, cached input) per million tokens, standard tier. OpenAI
+#: prices the cached read directly rather than as one flat discount — the
+#: gpt-5 line reads at 90% off, gpt-4.1 and the o-series at 75%, gpt-4o at
+#: 50% — so the multiplier is derived per model instead of assumed per
+#: provider. The two `pro` models publish no cached rate; they carry the
+#: family default, which stays inert as long as the API reports no cached
+#: tokens for them.
 _OPENAI = {
-    "gpt-4o-mini": (0.15, 0.60),
-    "gpt-4o": (2.50, 10.0),
-    "gpt-4.1-nano": (0.10, 0.40),
-    "gpt-4.1-mini": (0.40, 1.60),
-    "gpt-4.1": (2.00, 8.00),
-    "o4-mini": (1.10, 4.40),
-    "o3-mini": (1.10, 4.40),
-    "o3": (2.00, 8.00),
+    "gpt-5.6-sol": (5.00, 30.00, 0.50),
+    "gpt-5.6-terra": (2.50, 15.00, 0.25),
+    "gpt-5.6-luna": (1.00, 6.00, 0.10),
+    "gpt-5.5-pro": (30.00, 180.00, 3.00),
+    "gpt-5.5": (5.00, 30.00, 0.50),
+    "gpt-5.4-pro": (30.00, 180.00, 3.00),
+    "gpt-5.4-mini": (0.75, 4.50, 0.075),
+    "gpt-5.4-nano": (0.20, 1.25, 0.02),
+    "gpt-5.4": (2.50, 15.00, 0.25),
+    "gpt-5.2": (1.75, 14.00, 0.175),
+    "gpt-5.1": (1.25, 10.00, 0.125),
+    "gpt-5-mini": (0.25, 2.00, 0.025),
+    "gpt-5-nano": (0.05, 0.40, 0.005),
+    "gpt-5": (1.25, 10.00, 0.125),
+    "gpt-4.1-nano": (0.10, 0.40, 0.025),
+    "gpt-4.1-mini": (0.40, 1.60, 0.10),
+    "gpt-4.1": (2.00, 8.00, 0.50),
+    "gpt-4o-mini": (0.15, 0.60, 0.075),
+    "gpt-4o": (2.50, 10.00, 1.25),
+    "o4-mini": (1.10, 4.40, 0.275),
+    "o3": (2.00, 8.00, 0.50),
 }
 
 
@@ -74,11 +100,13 @@ class Price:
 
 def _build_table() -> dict[str, Price]:
     table = {m: Price(i, o) for m, (i, o) in _ANTHROPIC.items()}
-    # OpenAI discounts cached input rather than charging to write it.
+    # OpenAI discounts the cached read and charges nothing to write it, so the
+    # read multiplier comes from the published cached rate and the write
+    # multiplier is zero.
     table.update(
         {
-            m: Price(i, o, cache_read_mult=0.5, cache_write_mult=0.0)
-            for m, (i, o) in _OPENAI.items()
+            m: Price(i, o, cache_read_mult=cached / i, cache_write_mult=0.0)
+            for m, (i, o, cached) in _OPENAI.items()
         }
     )
     override = os.environ.get("TOLLGATE_PRICING")

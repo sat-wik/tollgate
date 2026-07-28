@@ -33,8 +33,11 @@ class _StubResponse:
         self.status_code = status_code
         self.headers = {"content-type": content_type}
         self.content = json.dumps(json_body).encode() if json_body is not None else b""
+        self.text = self.content.decode()
 
     def json(self):
+        if self._json is None:
+            raise ValueError("not json")
         return self._json
 
     async def aiter_bytes(self):
@@ -57,9 +60,10 @@ class _StubClient:
     """Stands in for httpx.AsyncClient, recording what the proxy forwarded."""
 
     captured: dict = {}
+    instances: int = 0
 
     def __init__(self, *args, **kwargs):
-        pass
+        type(self).instances += 1
 
     async def post(self, url, content=None, headers=None):
         _StubClient.captured = {"url": url, "content": content, "headers": headers}
@@ -154,16 +158,60 @@ def test_openai_endpoints_route_to_the_openai_upstream(client):
     assert "openai" in _StubClient.captured["url"]
 
 
-def test_non_200_upstream_is_relayed_without_being_captured(tmp_path, monkeypatch):
+def test_non_200_upstream_is_relayed_and_captured_as_a_free_failure(tmp_path, monkeypatch):
     class _Failing(_StubClient):
         async def post(self, url, content=None, headers=None):
             return _StubResponse(
-                json_body={"error": "nope"}, status_code=429, content_type="application/json"
+                json_body={"error": {"type": "rate_limit_error"}},
+                status_code=429,
+                content_type="application/json",
             )
 
     monkeypatch.setattr(httpx, "AsyncClient", _Failing)
     path = tmp_path / "captured.jsonl"
     with TestClient(create_app(str(path))) as c:
-        resp = c.post("/v1/messages", json={"model": "claude-opus-5", "messages": []})
+        resp = c.post(
+            "/v1/messages", json={"model": "claude-opus-5", "messages": []}
+        )
     assert resp.status_code == 429
-    assert not path.exists()
+
+    record = _only_record(path)
+    assert record["status"] == 429
+    assert record["response"]["error"]["type"] == "rate_limit_error"
+    # A rejected request is not billed, but its latency is still real.
+    assert record["cost_usd"] == 0.0
+    assert record["latency_ms"] is not None
+
+
+def test_upstream_error_with_a_non_json_body_is_still_captured(tmp_path, monkeypatch):
+    class _Failing(_StubClient):
+        async def post(self, url, content=None, headers=None):
+            resp = _StubResponse(status_code=502, content_type="text/html")
+            resp.content = b"<html>502 Bad Gateway</html>"
+            resp.text = "<html>502 Bad Gateway</html>"
+            resp._json = None
+            return resp
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Failing)
+    path = tmp_path / "captured.jsonl"
+    with TestClient(create_app(str(path))) as c:
+        resp = c.post("/v1/messages", json={"model": "claude-opus-5", "messages": []})
+    assert resp.status_code == 502
+
+    record = _only_record(path)
+    assert record["status"] == 502
+    assert "502 Bad Gateway" in record["response"]["error"]["message"]
+
+
+def test_upstream_client_is_pooled_across_requests(tmp_path, monkeypatch):
+    """A client per request would put a TLS handshake inside every measurement."""
+    monkeypatch.setattr(httpx, "AsyncClient", _StubClient)
+    _StubClient.instances = 0
+    path = tmp_path / "captured.jsonl"
+    with TestClient(create_app(str(path))) as c:
+        for _ in range(3):
+            c.post(
+                "/v1/messages",
+                json={"model": "claude-opus-5", "messages": []},
+            )
+    assert _StubClient.instances == 1
