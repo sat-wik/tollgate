@@ -33,6 +33,7 @@ the table with a JSON file:
 from __future__ import annotations
 
 import json
+import math
 import os
 from bisect import bisect_right
 from dataclasses import dataclass
@@ -279,7 +280,27 @@ _EMPTY_USAGE = dict.fromkeys(USAGE_FIELDS, 0)
 
 
 def _int(value: Any) -> int:
-    return value if isinstance(value, int) else 0
+    """Coerce a reported token count to a usable non-negative integer.
+
+    Providers send JSON integers, but anything between you and them — a
+    gateway, a proxy, a serializer that round-trips through a float — can turn
+    `100` into `100.0` or `"100"`. Rejecting those would silently price a real
+    call at zero, which is the worst failure a cost tool has: it looks like
+    success. Coerce what can be coerced, and floor at zero so a nonsensical
+    negative count can't offset real spend in a total.
+    """
+    if isinstance(value, bool):  # bool is an int subclass; a flag is not a count
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float):
+        return max(int(value), 0) if math.isfinite(value) else 0
+    if isinstance(value, str):
+        try:
+            return max(int(float(value)), 0)
+        except ValueError:
+            return 0
+    return 0
 
 
 def _with_write_split(usage: dict[str, int], breakdown: Any) -> dict[str, int]:

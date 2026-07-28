@@ -244,6 +244,19 @@ Local-first. Logs never leave your machine; requests go only to the provider
 your app was already calling, authenticated with your app's own headers.
 Credentials are forwarded upstream and never written to the log.
 
+Tollgate sits in the request path of an application that would work fine
+without it, so its own failures degrade observation and never the request being
+observed. Capture is a tee, not a step: records go to a bounded queue drained by
+a background thread, so a response never waits on a disk. With a second process
+holding the capture lock, 40 concurrent requests take 172 ms against a 156 ms
+baseline — writing inline made the same test 16x slower, which would have meant
+inflating the very latency this tool reports. If the capture file can't be written — full disk, read-only mount,
+changed permissions — the call still succeeds and Tollgate complains once on
+stderr rather than turning an answer you already paid for into a 500. If the
+provider can't be reached at all, the caller gets a `502` naming the transport
+error and the attempt is recorded, because an unreachable provider is precisely
+what a reliability log is for.
+
 ## License
 
 MIT

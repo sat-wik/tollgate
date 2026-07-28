@@ -169,3 +169,25 @@ def test_report_prices_each_call_at_its_own_date(tmp_path, capsys):
     row = json.loads(capsys.readouterr().out)[0]
     # $2/MTok under introductory pricing plus $3/MTok after it lapsed.
     assert row["cost_usd"] == pytest.approx(5.0)
+
+
+def test_missing_capture_log_gives_advice_not_a_traceback(tmp_path, capsys):
+    """Reporting before capturing anything is the most likely first command."""
+    with pytest.raises(SystemExit) as exit_info:
+        main(["report", "--logs", str(tmp_path / "nope.jsonl")])
+    assert exit_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "no capture log at" in err
+    assert "tollgate serve" in err
+
+
+def test_a_small_but_real_cost_does_not_render_as_zero():
+    from tollgate.cli import _fmt
+
+    # A cheap model at volume is exactly where rounding to 0.0000 misleads.
+    assert _fmt(0.0000150) != "0.0000"
+    assert _fmt(-0.00003) != "-0.0000"
+    assert _fmt(0.0) == "0"
+    assert _fmt(0.1500) == "0.1500"
+    assert _fmt(4.2) == "4.20"
+    assert _fmt(1234.5) == "1,234.50"

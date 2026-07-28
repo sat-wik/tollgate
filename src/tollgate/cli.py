@@ -19,7 +19,16 @@ def _fmt(value: Any) -> str:
     if value is None:
         return "-"
     if isinstance(value, float):
-        return f"{value:.4f}" if abs(value) < 1 else f"{value:,.2f}"
+        if value == 0:
+            return "0"
+        magnitude = abs(value)
+        if magnitude >= 1:
+            return f"{value:,.2f}"
+        if magnitude >= 1e-4:
+            return f"{value:.4f}"
+        # Four decimals rounds a real cost to 0.0000, which reads as free —
+        # exactly the wrong impression for a cheap model at high volume.
+        return f"{value:.2e}"
     if isinstance(value, int):
         return f"{value:,}"
     return str(value)
@@ -204,7 +213,17 @@ def main(argv: list[str] | None = None) -> None:
     if not argv or (argv[0] not in SUBCOMMANDS and argv[0] not in ("-h", "--help")):
         argv.insert(0, "serve")
     args = build_parser().parse_args(argv)
-    args.func(args)
+    try:
+        args.func(args)
+    except FileNotFoundError as exc:
+        # Reporting before anything has been captured is the most likely first
+        # command anyone runs, and a traceback is a poor answer to it.
+        print(f"no capture log at {exc.filename}", file=sys.stderr)
+        print(
+            "run `tollgate serve`, point your app at it, then try again",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

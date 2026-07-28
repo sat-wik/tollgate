@@ -21,6 +21,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
+import threading
+import time
 import uuid
 
 try:
@@ -29,7 +32,7 @@ except ImportError:  # pragma: no cover - Windows has no flock
     fcntl = None  # type: ignore[assignment]
 
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from .pricing import cost_usd, normalize_usage, response_model, service_tier
 
@@ -132,6 +135,84 @@ def log_record(path: str, record: dict[str, Any]) -> None:
         finally:
             if fcntl is not None:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+class CaptureWriter:
+    """A background writer so observation never sits on the request path.
+
+    Capture is a tee, not a step: the caller's response must not wait on a
+    disk. Writing inline — even off the event loop in a worker thread — still
+    makes every response wait for the file lock, which a second Tollgate
+    process can hold for as long as it likes. Records are handed to a bounded
+    queue and drained by one thread instead.
+
+    A single writer also means the exclusive lock is uncontended within a
+    process, so it only ever costs anything when another process really is
+    writing to the same file.
+
+    If the queue fills, records are dropped rather than blocking the proxy.
+    Under backpressure severe enough to outrun a sequential file append, losing
+    observations is the right thing to lose.
+    """
+
+    def __init__(self, path: str, maxsize: int = 10_000) -> None:
+        self.path = path
+        self.dropped = 0
+        self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize)
+        self._thread: threading.Thread | None = None
+        self._on_error: Callable[[BaseException], None] | None = None
+
+    def start(self, on_error: Callable[[BaseException], None] | None = None) -> None:
+        if self._thread is not None:
+            return
+        self._on_error = on_error
+        self._thread = threading.Thread(target=self._drain, daemon=True, name="tollgate-capture")
+        self._thread.start()
+
+    def submit(self, record: dict[str, Any]) -> bool:
+        """Queue a record. Returns False if it was dropped."""
+        try:
+            self._queue.put_nowait(record)
+            return True
+        except queue.Full:
+            self.dropped += 1
+            return False
+
+    def flush(self, timeout: float = 5.0) -> bool:
+        """Block until everything queued so far has reached the file.
+
+        Writing is asynchronous, so a caller that wants to read the log right
+        after making a request needs a sync point. Returns False on timeout.
+        """
+        with self._queue.all_tasks_done:
+            deadline = time.monotonic() + timeout
+            while self._queue.unfinished_tasks:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._queue.all_tasks_done.wait(remaining)
+        return True
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Drain what is queued, then stop. Called on shutdown."""
+        if self._thread is None:
+            return
+        self._queue.put(None)
+        self._thread.join(timeout)
+        self._thread = None
+
+    def _drain(self) -> None:
+        while True:
+            record = self._queue.get()
+            try:
+                if record is None:
+                    return
+                log_record(self.path, record)
+            except Exception as exc:  # noqa: BLE001 - a writer must not die
+                if self._on_error is not None:
+                    self._on_error(exc)
+            finally:
+                self._queue.task_done()
 
 
 def iter_records(path: str) -> Iterator[dict[str, Any]]:

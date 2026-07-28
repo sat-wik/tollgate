@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from tollgate.proxy import (
     accumulate_anthropic,
     accumulate_openai_chat,
@@ -84,3 +86,54 @@ def test_app_exposes_all_three_endpoints(tmp_path):
     app = create_app(str(tmp_path / "c.jsonl"))
     routes = {r.path for r in app.routes}
     assert {"/v1/chat/completions", "/v1/messages", "/v1/responses"} <= routes
+
+
+# -- malformed SSE ------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "\n\n\n",
+        "data:",
+        "data: [DONE]",
+        "data: null",
+        "data: 42",
+        "data: []",
+        'data: {"broken": ',
+        "garbage\r\ndata: {}\r\n",
+        'data: {"type":"message_start","message":null}',
+        'data: {"type":"content_block_delta","delta":null}',
+        'data: {"type":"message_delta","usage":"not-a-dict"}',
+        'data: {"choices":"not-a-list"}',
+        'data: {"choices":[null]}',
+        'data: {"choices":[{"delta":"not-a-dict"}]}',
+        'data: {"type":"response.completed","response":null}',
+    ],
+)
+def test_accumulators_survive_malformed_streams(raw):
+    """These run inside the relay generator's teardown, so an exception here
+    breaks the caller's stream mid-flight — they must not raise."""
+    for accumulate in (
+        accumulate_anthropic,
+        accumulate_openai_chat,
+        accumulate_openai_responses,
+    ):
+        assert isinstance(accumulate(raw), dict)
+
+
+def test_accumulators_still_extract_from_a_stream_with_junk_mixed_in():
+    raw = "\n".join(
+        [
+            'data: {"choices":"not-a-list"}',
+            'data: {"type":"message_start","message":{"model":"claude-opus-5","usage":{"input_tokens":7}}}',
+            'data: {"type":"content_block_delta","delta":null}',
+            'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}',
+            'data: {"type":"message_delta","usage":"junk"}',
+            'data: {"type":"message_delta","usage":{"output_tokens":3}}',
+        ]
+    )
+    out = accumulate_anthropic(raw)
+    assert out["content"][0]["text"] == "ok"
+    assert out["usage"] == {"input_tokens": 7, "output_tokens": 3}

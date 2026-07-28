@@ -323,3 +323,43 @@ def test_pricing_override_file(tmp_path, monkeypatch):
     finally:
         monkeypatch.delenv("TOLLGATE_PRICING")
         importlib.reload(pricing)
+
+
+# -- malformed provider output ------------------------------------------------
+
+
+def test_float_token_counts_are_not_silently_dropped():
+    """A gateway or serializer that round-trips through a float turns 100 into
+    100.0. Rejecting that priced a real call at $0 — success-looking failure."""
+    out = normalize_usage({"usage": {"input_tokens": 100.0, "output_tokens": 50.0}})
+    assert out["input_tokens"] == 100
+    assert out["output_tokens"] == 50
+    assert cost_usd("claude-opus-5", out, at=TODAY) > 0
+
+
+def test_string_token_counts_are_coerced():
+    out = normalize_usage({"usage": {"input_tokens": "100", "output_tokens": "50"}})
+    assert out["input_tokens"] == 100
+    assert out["output_tokens"] == 50
+
+
+def test_negative_token_counts_cannot_produce_a_negative_cost():
+    # A negative count is nonsense, and left alone it would offset real spend
+    # in whatever group total it lands in.
+    out = normalize_usage({"usage": {"input_tokens": -100, "output_tokens": -50}})
+    assert out["input_tokens"] == 0
+    assert cost_usd("claude-opus-5", out, at=TODAY) == 0.0
+
+
+def test_a_boolean_is_not_a_token_count():
+    # bool is an int subclass in Python, so `True` would otherwise count as 1.
+    out = normalize_usage({"usage": {"input_tokens": True, "output_tokens": False}})
+    assert out["input_tokens"] == 0
+    assert isinstance(out["input_tokens"], int)
+
+
+def test_non_finite_and_junk_token_counts_are_ignored():
+    for junk in (float("nan"), float("inf"), [1], {"a": 1}, None, "abc"):
+        out = normalize_usage({"usage": {"input_tokens": junk}})
+        assert out["input_tokens"] == 0
+        assert cost_usd("claude-opus-5", out, at=TODAY) == 0.0

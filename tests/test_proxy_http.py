@@ -83,8 +83,33 @@ class _StubClient:
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx, "AsyncClient", _StubClient)
     path = tmp_path / "captured.jsonl"
-    with TestClient(create_app(str(path))) as c:
-        yield c, path
+    app = create_app(str(path))
+    with TestClient(app) as c:
+        yield _Flushing(c, app), path
+
+
+class _Flushing:
+    """A TestClient that drains the background capture writer after each call.
+
+    Capture is asynchronous in production; a test that asserts on the log needs
+    to wait for it, and doing that here keeps every test from repeating it.
+    """
+
+    def __init__(self, client, app):
+        self._client = client
+        self._writer = app.state.capture_writer
+
+    def post(self, *a, **k):
+        try:
+            return self._client.post(*a, **k)
+        finally:
+            self._writer.flush()
+
+    def stream(self, *a, **k):
+        return self._client.stream(*a, **k)
+
+    def flush(self):
+        self._writer.flush()
 
 
 def _only_record(path):
