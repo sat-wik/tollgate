@@ -5,8 +5,8 @@ from tollgate.proxy import (
     accumulate_openai_chat,
     accumulate_openai_responses,
     create_app,
-    log_record,
 )
+from tollgate.record import build_record, log_record
 
 
 def test_accumulate_openai_chat_stream():
@@ -57,14 +57,26 @@ def test_log_record_roundtrip(tmp_path):
     path = tmp_path / "captured.jsonl"
     log_record(
         str(path),
-        "/v1/messages",
-        {"model": "claude-opus-4-8", "messages": [{"role": "user", "content": "hi"}]},
-        {"content": [{"type": "text", "text": "hello"}]},
+        build_record(
+            "/v1/messages",
+            {"model": "claude-opus-4-8", "messages": [{"role": "user", "content": "hi"}]},
+            {
+                "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": "hello"}],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
+            latency_ms=812.35,
+        ),
     )
     entry = json.loads(path.read_text().strip())
     assert entry["endpoint"] == "/v1/messages"
+    assert entry["provider"] == "anthropic"
     assert entry["request"]["model"] == "claude-opus-4-8"
     assert entry["response"]["content"][0]["text"] == "hello"
+    assert entry["latency_ms"] == 812.4
+    assert entry["usage"]["input_tokens"] == 10
+    # 10 in @ $5/Mtok + 5 out @ $25/Mtok
+    assert entry["cost_usd"] == 10 * 5e-6 + 5 * 25e-6
     assert "timestamp" in entry
 
 

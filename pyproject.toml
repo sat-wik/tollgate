@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tollgate-proxy"
-version = "0.1.0"
-description = "A local observe-only capture proxy for LLM API traffic, with real streaming SSE passthrough."
+version = "0.2.0"
+description = "A local capture proxy for LLM API traffic, with per-request cost attribution and replay-based analysis."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
