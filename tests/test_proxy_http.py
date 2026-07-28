@@ -130,12 +130,9 @@ def test_streaming_call_relays_chunks_and_reconstructs_the_response(client):
     record = _only_record(path)
     assert record["stream"] is True
     assert record["response"]["content"][0]["text"] == "hi"
-    assert record["usage"] == {
-        "input_tokens": 100,
-        "output_tokens": 40,
-        "cache_read_tokens": 0,
-        "cache_write_tokens": 0,
-    }
+    assert record["usage"]["input_tokens"] == 100
+    assert record["usage"]["output_tokens"] == 40
+    assert record["usage"]["cache_read_tokens"] == 0
     assert record["ttft_ms"] is not None
 
 
@@ -215,3 +212,19 @@ def test_upstream_client_is_pooled_across_requests(tmp_path, monkeypatch):
                 json={"model": "claude-opus-5", "messages": []},
             )
     assert _StubClient.instances == 1
+
+
+def test_a_stream_read_to_completion_is_not_marked_truncated(client):
+    c, path = client
+    with c.stream(
+        "POST",
+        "/v1/messages",
+        json={
+            "model": "claude-opus-5",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    ) as resp:
+        list(resp.iter_bytes())
+
+    assert _only_record(path)["truncated"] is False

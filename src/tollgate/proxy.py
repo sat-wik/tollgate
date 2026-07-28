@@ -179,13 +179,19 @@ def create_app(capture_path: str | None = None) -> FastAPI:
 
             async def relay():
                 nonlocal ttft
+                completed = False
                 try:
                     async for chunk in resp.aiter_bytes():
                         if ttft is None:
                             ttft = (time.perf_counter() - started) * 1000
                         captured.append(chunk)
                         yield chunk
+                    completed = True
                 finally:
+                    # If the client hung up, `yield` raised GeneratorExit and
+                    # `completed` stayed False. The bytes so far are real and
+                    # billed, but the usage and latency are cut short — record
+                    # that rather than passing a partial call off as whole.
                     elapsed = (time.perf_counter() - started) * 1000
                     await upstream.__aexit__(None, None, None)
                     raw = b"".join(captured).decode("utf-8", "replace")
@@ -205,6 +211,7 @@ def create_app(capture_path: str | None = None) -> FastAPI:
                             stream=True,
                             latency_ms=elapsed,
                             ttft_ms=ttft,
+                            truncated=not completed,
                         ),
                     )
 

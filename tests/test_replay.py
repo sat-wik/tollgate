@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from tollgate.record import build_record, load_records, log_record, prompt_sha, request_sha
 from tollgate.replay import compare, percentile, reprice, summarize
 
@@ -124,3 +126,82 @@ def test_record_is_json_serializable_end_to_end(tmp_path):
     path = tmp_path / "captured.jsonl"
     log_record(str(path), _record("claude-opus-5", 10, 10, 100.0))
     assert json.loads(path.read_text().strip())["cost_usd"] is not None
+
+
+def test_v020_logs_reprice_correctly_at_their_historical_rate(tmp_path):
+    """An older log lacks the TTL split and carries a cost computed at the
+    wrong rate. Repricing from the raw pair has to fix both."""
+    path = tmp_path / "old.jsonl"
+    legacy = {
+        "id": "abc123",
+        "timestamp": "2026-02-10T10:00:00.000+00:00",
+        "endpoint": "/v1/messages",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "status": 200,
+        "latency_ms": 900.0,
+        # No service_tier key, and no cache_write_5m/1h split.
+        "usage": {
+            "input_tokens": 250_000,
+            "output_tokens": 1_000,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        },
+        "cost_usd": 0.765,  # computed with a flat rate that didn't apply then
+        "prompt_sha": "deadbeefdeadbeef",
+        "request": {"model": "claude-sonnet-4-6", "messages": []},
+        "response": {
+            "model": "claude-sonnet-4-6",
+            "usage": {"input_tokens": 250_000, "output_tokens": 1_000},
+        },
+    }
+    path.write_text(json.dumps(legacy) + "\n")
+
+    repriced = reprice(load_records(str(path)))[0]
+    # February 2026 predates flat long-context pricing, so a 250K-token prompt
+    # billed at 2x input / 1.5x output.
+    assert repriced["cost_usd"] == pytest.approx(250_000 * 6e-6 + 1_000 * 22.5e-6)
+    assert repriced["cost_usd"] > legacy["cost_usd"]
+    assert repriced["usage"]["cache_write_5m_tokens"] == 0
+
+
+def test_truncated_calls_are_counted_but_kept_out_of_the_percentiles():
+    """A cut-short stream's latency is time-to-disconnect. Averaging it with
+    completion latency makes both numbers meaningless."""
+    whole = [_record("claude-opus-5", 10, 10, 3000.0) for _ in range(3)]
+    cut = _record("claude-opus-5", 10, 0, 40.0)
+    cut["truncated"] = True
+
+    row = summarize(whole + [cut])[0]
+    assert row["calls"] == 4
+    assert row["truncated"] == 1
+    # 40ms would otherwise drag p50 down by a factor of ~75.
+    assert row["latency_p50_ms"] == 3000.0
+
+
+def test_records_without_a_truncated_field_are_treated_as_complete():
+    row = summarize([_record("claude-opus-5", 10, 10, 100.0)])[0]
+    assert row["truncated"] == 0
+    assert row["latency_p50_ms"] == 100.0
+
+
+def test_reprice_iter_can_drop_bodies_without_changing_the_numbers():
+    from tollgate.replay import reprice_iter
+
+    records = [_record("claude-opus-5", 1_000_000, 0, 100.0) for _ in range(3)]
+    fat = list(reprice_iter(records, keep_bodies=True))
+    slim = list(reprice_iter(records, keep_bodies=False))
+    assert [r["cost_usd"] for r in fat] == [r["cost_usd"] for r in slim]
+    assert "request" in fat[0] and "request" not in slim[0]
+
+
+def test_summarize_accepts_an_iterator(tmp_path):
+    from tollgate.record import iter_records
+
+    path = tmp_path / "c.jsonl"
+    for _ in range(3):
+        log_record(str(path), _record("claude-opus-5", 1_000_000, 0, 100.0))
+    streamed = summarize(iter_records(str(path)))
+    buffered = summarize(load_records(str(path)))
+    assert streamed == buffered
+    assert streamed[0]["cost_usd"] == 15.0

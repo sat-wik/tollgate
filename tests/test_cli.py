@@ -114,3 +114,58 @@ def test_concurrent_writers_do_not_tear_lines(tmp_path):
     for line in lines:
         json.loads(line)
     assert len(load_records(path)) == 60
+
+
+def test_cache_command_reports_findings(tmp_path, capsys):
+    path = tmp_path / "c.jsonl"
+    for _ in range(6):
+        log_record(
+            str(path),
+            build_record(
+                "/v1/messages",
+                {"model": "claude-opus-5", "messages": [{"role": "user", "content": "big"}]},
+                {"model": "claude-opus-5", "usage": {"input_tokens": 20_000, "output_tokens": 10}},
+            ),
+        )
+    main(["cache", "--logs", str(path)])
+    out = capsys.readouterr().out
+    assert "never_cached" in out
+    assert "recoverable" in out
+
+
+def test_cache_command_is_quiet_when_nothing_is_wrong(tmp_path, capsys):
+    path = tmp_path / "c.jsonl"
+    _write(path)
+    main(["cache", "--logs", str(path)])
+    assert "no caching problems found" in capsys.readouterr().out
+
+
+def test_rates_prices_at_a_given_date(capsys):
+    main(["rates", "--model", "claude-sonnet-5", "--at", "2026-08-15", "--json"])
+    intro = json.loads(capsys.readouterr().out)[0]
+    main(["rates", "--model", "claude-sonnet-5", "--at", "2026-09-15", "--json"])
+    standard = json.loads(capsys.readouterr().out)[0]
+    assert intro["input"] == 2.0
+    assert standard["input"] == 3.0
+
+
+def test_rates_for_an_unknown_model_says_so(capsys):
+    main(["rates", "--model", "not-a-model"])
+    assert "no price known" in capsys.readouterr().out
+
+
+def test_report_prices_each_call_at_its_own_date(tmp_path, capsys):
+    """A log spanning a price change must not be repriced at today's rate."""
+    path = tmp_path / "c.jsonl"
+    for stamp in ("2026-08-15T00:00:00+00:00", "2026-09-15T00:00:00+00:00"):
+        rec = build_record(
+            "/v1/messages",
+            {"model": "claude-sonnet-5", "messages": []},
+            {"model": "claude-sonnet-5", "usage": {"input_tokens": 1_000_000, "output_tokens": 0}},
+        )
+        rec["timestamp"] = stamp
+        log_record(str(path), rec)
+    main(["report", "--logs", str(path), "--json"])
+    row = json.loads(capsys.readouterr().out)[0]
+    # $2/MTok under introductory pricing plus $3/MTok after it lapsed.
+    assert row["cost_usd"] == pytest.approx(5.0)

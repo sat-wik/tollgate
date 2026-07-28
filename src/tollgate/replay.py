@@ -23,11 +23,11 @@ from __future__ import annotations
 import copy
 import os
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Iterator
 
 import httpx
 
-from .pricing import cost_usd, normalize_usage, response_model
+from .pricing import cost_usd, normalize_usage, response_model, service_tier
 from .record import build_record
 
 UPSTREAMS = {
@@ -41,26 +41,44 @@ ANTHROPIC_VERSION = os.environ.get("TOLLGATE_ANTHROPIC_VERSION", "2023-06-01")
 # -- offline: deterministic recompute ----------------------------------------
 
 
-def reprice(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def reprice_iter(
+    records: Iterable[dict[str, Any]], *, keep_bodies: bool = True
+) -> Iterator[dict[str, Any]]:
     """Recompute usage and cost for each record from its raw pair.
 
     Pure: no network, no clock, no randomness. Latency is carried through from
     the capture (it can only be measured live), everything else is derived.
+
+    `keep_bodies=False` drops the request and response once they have been
+    priced. Aggregation never reads them again, and they are the whole reason a
+    capture log is large — dropping them keeps a report's memory proportional
+    to the number of calls rather than the volume of traffic.
     """
-    out = []
     for rec in records:
         request = rec.get("request") or {}
         response = rec.get("response")
         model = response_model(request, response)
         usage = normalize_usage(response)
+        tier = service_tier(request, response)
         priced = dict(rec)
         priced["model"] = model
         priced["usage"] = usage
+        priced["service_tier"] = tier
         priced["cost_usd"] = (
-            0.0 if rec.get("status", 200) != 200 else cost_usd(model, usage)
+            0.0
+            if rec.get("status", 200) != 200
+            # Priced at the rate in force when the call was made, not today's.
+            else cost_usd(model, usage, at=rec.get("timestamp"), tier=tier)
         )
-        out.append(priced)
-    return out
+        if not keep_bodies:
+            priced.pop("request", None)
+            priced.pop("response", None)
+        yield priced
+
+
+def reprice(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`reprice_iter` collected into a list, with the raw pairs intact."""
+    return list(reprice_iter(records))
 
 
 def percentile(values: list[float], pct: float) -> float | None:
@@ -73,22 +91,28 @@ def percentile(values: list[float], pct: float) -> float | None:
 
 
 def summarize(
-    records: list[dict[str, Any]], group_by: str = "model"
+    records: Iterable[dict[str, Any]], group_by: str = "model"
 ) -> list[dict[str, Any]]:
     """Aggregate priced records into one row per group, most expensive first.
+
+    Accepts an iterator, so a report can stream a log it could not hold.
 
     `cost_usd` is None for any group containing a model with no known price —
     a partially-priced total would read as authoritative when it isn't.
     """
     groups: dict[Any, list[dict[str, Any]]] = {}
-    for rec in reprice(records):
+    for rec in reprice_iter(records, keep_bodies=False):
         groups.setdefault(rec.get(group_by), []).append(rec)
 
     rows = []
     for key, recs in groups.items():
         costs = [r["cost_usd"] for r in recs]
-        latencies = [r["latency_ms"] for r in recs if r.get("latency_ms") is not None]
-        ttfts = [r["ttft_ms"] for r in recs if r.get("ttft_ms") is not None]
+        # A truncated stream's latency is time-to-disconnect, which is not
+        # comparable to time-to-completion — averaging the two together makes
+        # both meaningless, so they are counted but not timed.
+        timed = [r for r in recs if not r.get("truncated")]
+        latencies = [r["latency_ms"] for r in timed if r.get("latency_ms") is not None]
+        ttfts = [r["ttft_ms"] for r in timed if r.get("ttft_ms") is not None]
         rows.append(
             {
                 group_by: key,
@@ -96,6 +120,7 @@ def summarize(
                 # Failures keep their latency in the percentiles — a 30-second
                 # timeout before a 500 is exactly what a latency report is for.
                 "errors": sum(1 for r in recs if r.get("status", 200) != 200),
+                "truncated": sum(1 for r in recs if r.get("truncated")),
                 "input_tokens": sum(r["usage"]["input_tokens"] for r in recs),
                 "output_tokens": sum(r["usage"]["output_tokens"] for r in recs),
                 "cache_read_tokens": sum(r["usage"]["cache_read_tokens"] for r in recs),
@@ -111,6 +136,10 @@ def summarize(
 
 
 # -- live: re-issue and diff -------------------------------------------------
+
+
+def _provider_for(record: dict[str, Any]) -> str:
+    return "anthropic" if record.get("endpoint") == "/v1/messages" else "openai"
 
 
 def auth_headers(provider: str) -> dict[str, str]:
@@ -150,7 +179,7 @@ def replay_once(
     request.pop("stream", None)
 
     endpoint = record["endpoint"]
-    provider = record.get("provider") or ("anthropic" if endpoint == "/v1/messages" else "openai")
+    provider = record.get("provider") or _provider_for(record)
     url = UPSTREAMS[provider] + endpoint
 
     owned = client is None
@@ -172,6 +201,16 @@ def replay_once(
     )
 
 
+def replayable(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Records worth re-issuing.
+
+    A baseline that failed has no cost or latency to compare against — pairing
+    a zero-cost 429 with a real replay reads as a cost increase that never
+    happened. Skip them rather than publish the delta.
+    """
+    return [r for r in records if r.get("status", 200) == 200]
+
+
 def replay_live(
     records: list[dict[str, Any]],
     *,
@@ -179,8 +218,20 @@ def replay_live(
     transform: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     limit: int | None = None,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
-    """Replay records in order, returning (baseline, replayed) pairs."""
-    selected = reprice(records)[:limit] if limit else reprice(records)
+    """Replay records in order, returning (baseline, replayed) pairs.
+
+    Every credential the run will need is checked before the first request, so
+    a missing key for the second provider in a mixed log fails at zero cost
+    rather than halfway through a paid run.
+    """
+    selected = replayable(records)
+    if limit:
+        selected = selected[:limit]
+    selected = reprice(selected)
+
+    for provider in {r.get("provider") or _provider_for(r) for r in selected}:
+        auth_headers(provider)
+
     pairs = []
     with httpx.Client(timeout=600.0) as client:
         for rec in selected:

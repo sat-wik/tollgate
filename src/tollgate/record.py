@@ -29,9 +29,9 @@ except ImportError:  # pragma: no cover - Windows has no flock
     fcntl = None  # type: ignore[assignment]
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
-from .pricing import cost_usd, normalize_usage, response_model
+from .pricing import cost_usd, normalize_usage, response_model, service_tier
 
 PROVIDERS = {
     "/v1/chat/completions": "openai",
@@ -68,21 +68,32 @@ def build_record(
     stream: bool = False,
     latency_ms: float | None = None,
     ttft_ms: float | None = None,
+    truncated: bool = False,
 ) -> dict[str, Any]:
     model = response_model(request, response)
     usage = normalize_usage(response)
+    tier = service_tier(request, response)
+    timestamp = datetime.now(timezone.utc)
     # A rejected request is not billed, and pricing it as `None` would poison
     # the total of every group it lands in. Note this under-counts a stream
     # that failed partway: tokens already emitted do bill.
-    cost = 0.0 if status != 200 else cost_usd(model, usage)
+    cost = (
+        0.0
+        if status != 200
+        else cost_usd(model, usage, at=timestamp, tier=tier)
+    )
     return {
         "id": uuid.uuid4().hex[:16],
-        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        "timestamp": timestamp.isoformat(timespec="milliseconds"),
         "endpoint": endpoint,
         "provider": PROVIDERS.get(endpoint, "unknown"),
         "model": model,
+        "service_tier": tier,
         "stream": stream,
         "status": status,
+        # The client hung up mid-stream: the usage below is a lower bound and
+        # the latency is time-to-disconnect, not time-to-completion.
+        "truncated": truncated,
         "latency_ms": round(latency_ms, 1) if latency_ms is not None else None,
         "ttft_ms": round(ttft_ms, 1) if ttft_ms is not None else None,
         "usage": usage,
@@ -123,13 +134,17 @@ def log_record(path: str, record: dict[str, Any]) -> None:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
-def load_records(path: str) -> list[dict[str, Any]]:
-    """Read a capture log, skipping lines that aren't parseable JSON objects.
+def iter_records(path: str) -> Iterator[dict[str, Any]]:
+    """Stream a capture log one record at a time.
 
-    A log is appended to by a live proxy, so the last line can be a partial
-    write; that shouldn't break analysis of everything before it.
+    Records hold whole request and response bodies, so a busy service writes
+    gigabytes a day. Reading the file into a list would put all of that in
+    memory at once; analysis only ever needs one record in hand.
+
+    Lines that aren't parseable JSON objects are skipped — a log is appended to
+    by a live proxy, so the last line can be a partial write, and that shouldn't
+    break analysis of everything before it.
     """
-    records: list[dict[str, Any]] = []
     with open(os.path.expanduser(path)) as f:
         for line in f:
             line = line.strip()
@@ -140,5 +155,9 @@ def load_records(path: str) -> list[dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(obj, dict):
-                records.append(obj)
-    return records
+                yield obj
+
+
+def load_records(path: str) -> list[dict[str, Any]]:
+    """Read a whole capture log into memory. Prefer `iter_records` for analysis."""
+    return list(iter_records(path))
