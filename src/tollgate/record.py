@@ -158,6 +158,7 @@ class CaptureWriter:
     def __init__(self, path: str, maxsize: int = 10_000) -> None:
         self.path = path
         self.dropped = 0
+        self.written = 0
         self._queue: queue.Queue[dict[str, Any] | None] = queue.Queue(maxsize)
         self._thread: threading.Thread | None = None
         self._on_error: Callable[[BaseException], None] | None = None
@@ -208,6 +209,7 @@ class CaptureWriter:
                 if record is None:
                     return
                 log_record(self.path, record)
+                self.written += 1
             except Exception as exc:  # noqa: BLE001 - a writer must not die
                 if self._on_error is not None:
                     self._on_error(exc)

@@ -1,5 +1,7 @@
 import json
 import multiprocessing
+import os
+import sys
 
 import pytest
 
@@ -191,3 +193,98 @@ def test_a_small_but_real_cost_does_not_render_as_zero():
     assert _fmt(0.1500) == "0.1500"
     assert _fmt(4.2) == "4.20"
     assert _fmt(1234.5) == "1,234.50"
+
+
+# -- non-coder flows ----------------------------------------------------------
+
+
+def test_run_needs_a_command(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run"])
+    assert exit_info.value.code == 2
+    assert "tollgate run -- python app.py" in capsys.readouterr().err
+
+
+def test_run_reports_a_missing_program_plainly(capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(["run", "--port", "4291", "--", "definitely-not-a-real-program"])
+    assert exit_info.value.code == 127
+    assert "couldn't find a program" in capsys.readouterr().err
+
+
+def test_run_passes_through_the_commands_exit_code(tmp_path):
+    with pytest.raises(SystemExit) as exit_info:
+        main([
+            "run", "--port", "4292", "--quiet",
+            "--out", str(tmp_path / "c.jsonl"),
+            "--", sys.executable, "-c", "raise SystemExit(3)",
+        ])
+    assert exit_info.value.code == 3
+
+
+def test_run_sets_both_base_urls_for_the_child_and_unsets_them_after(tmp_path, capfd):
+    """The whole point: the setting exists for one command, then is gone."""
+    script = (
+        "import os;"
+        "print('A=' + os.environ['ANTHROPIC_BASE_URL']);"
+        "print('O=' + os.environ['OPENAI_BASE_URL'])"
+    )
+    with pytest.raises(SystemExit):
+        main([
+            "run", "--port", "4293", "--quiet",
+            "--out", str(tmp_path / "c.jsonl"),
+            "--", sys.executable, "-c", script,
+        ])
+    # capfd, not capsys: the child writes to the OS file descriptor.
+    out = capfd.readouterr().out
+    assert "A=http://127.0.0.1:4293" in out
+    assert "O=http://127.0.0.1:4293/v1" in out
+    # Nothing leaked into the parent process.
+    assert "ANTHROPIC_BASE_URL" not in os.environ
+
+
+def test_run_says_so_when_no_traffic_went_through(tmp_path, capsys):
+    with pytest.raises(SystemExit):
+        main([
+            "run", "--port", "4294", "--quiet",
+            "--out", str(tmp_path / "c.jsonl"),
+            "--", sys.executable, "-c", "pass",
+        ])
+    out = capsys.readouterr().out
+    assert "No AI calls went through Tollgate" in out
+
+
+def test_status_warns_when_connected_but_not_running(tmp_path, monkeypatch, capsys):
+    """The one combination that silently breaks someone's app."""
+    from tollgate import shell
+
+    profile = tmp_path / ".zshrc"
+    shell.connect(profile, "http://127.0.0.1:4295")
+    monkeypatch.setattr(shell, "profile_path", lambda *a, **k: profile)
+
+    main(["status", "--port", "4295", "--out", str(tmp_path / "c.jsonl")])
+    out = capsys.readouterr().out
+    assert "isn't running" in out
+    assert "tollgate disconnect" in out
+
+
+def test_status_does_not_warn_when_nothing_is_connected(tmp_path, monkeypatch, capsys):
+    from tollgate import shell
+
+    profile = tmp_path / ".zshrc"
+    profile.write_text("# nothing here\n")
+    monkeypatch.setattr(shell, "profile_path", lambda *a, **k: profile)
+
+    main(["status", "--port", "4296", "--out", str(tmp_path / "c.jsonl")])
+    assert "isn't running" not in capsys.readouterr().out
+
+
+def test_disconnect_reports_when_there_was_nothing_to_do(tmp_path, monkeypatch, capsys):
+    from tollgate import shell
+
+    profile = tmp_path / ".zshrc"
+    profile.write_text("# nothing here\n")
+    monkeypatch.setattr(shell, "profile_path", lambda *a, **k: profile)
+
+    main(["disconnect"])
+    assert "Nothing to disconnect" in capsys.readouterr().out

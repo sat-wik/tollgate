@@ -6,6 +6,7 @@ handler parameter silently turns every call into a 422.
 """
 
 import json
+from contextlib import contextmanager
 
 import httpx
 import pytest
@@ -105,8 +106,14 @@ class _Flushing:
         finally:
             self._writer.flush()
 
+    @contextmanager
     def stream(self, *a, **k):
-        return self._client.stream(*a, **k)
+        # Flush on exit, not on entry: a streamed record is only written once
+        # the body has been consumed. Without this the test reads the log
+        # before the writer gets there and fails intermittently.
+        with self._client.stream(*a, **k) as resp:
+            yield resp
+        self._writer.flush()
 
     def flush(self):
         self._writer.flush()

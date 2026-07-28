@@ -13,22 +13,110 @@ observes; it never redirects.
 ## Quick start
 
 ```sh
-pip install tollgate-proxy   # or: pip install -e .
-tollgate                     # listens on 127.0.0.1:4141
+pip install tollgate-proxy
+tollgate run -- python your_app.py
 ```
 
-Point your client at it:
+That's the whole thing. Tollgate starts, your app runs with its AI calls going
+through it, and both stop together:
 
-```python
-# OpenAI
-client = OpenAI(base_url="http://127.0.0.1:4141/v1")
+```
+Measuring: python your_app.py
+------------------------------------------------------------------------------
+15:49:34  claude-opus-5                 12,403 in      380 out     2,143ms      $0.0755
+15:49:35  claude-opus-5                  8,900 in      210 out     1,004ms      $0.0498
+app finished normally
+------------------------------------------------------------------------------
+2 call(s) this run. Totals for /Users/you/.tollgate/captured.jsonl:
 
-# Anthropic
-client = anthropic.Anthropic(base_url="http://127.0.0.1:4141")
+model          calls  errors  input_tokens  output_tokens  cost_usd
+-------------  -----  ------  ------------  -------------  --------
+claude-opus-5  2      0       21,303        590            0.1253
 ```
 
-Calls flow through to `api.openai.com` / `api.anthropic.com` as usual; captures
-append to `~/.tollgate/captured.jsonl`.
+**Nothing is left behind.** `run` sets the connection for that one command
+only, so there is nothing to switch off afterwards and no way to end up with a
+machine pointed at a proxy that isn't running. Use it when you want it; don't
+when you don't.
+
+Works with anything that starts from a terminal — `tollgate run -- npm start`,
+`tollgate run -- ./my-app`, `tollgate run -- python -m myservice`.
+
+## Leaving it on
+
+If you'd rather measure everything without prefixing each command:
+
+```sh
+tollgate connect      # route this machine's AI traffic through Tollgate
+tollgate              # leave this running in its own window
+```
+
+```sh
+tollgate disconnect   # put everything back
+```
+
+`connect` writes two settings into your shell startup file between clearly
+marked lines, keeps a `.tollgate-backup` copy of the file as it was, and
+`disconnect` removes exactly those lines. Both tell you to open a new terminal
+for the change to take effect.
+
+The one thing to know: while connected, **Tollgate has to be running**, or your
+app can't reach the AI service. If you're unsure:
+
+```sh
+tollgate status
+```
+
+```
+Tollgate running on http://127.0.0.1:4141   no
+Set up to capture traffic       yes  (/Users/you/.zshrc)
+Active in this terminal         no
+Capture file                    /Users/you/.tollgate/captured.jsonl (412 call(s))
+
+Warning: traffic is set to go through Tollgate, but Tollgate
+isn't running — apps will fail to reach the AI service.
+Start it with `tollgate`, or undo with `tollgate disconnect`.
+```
+
+## Running it as a proxy directly
+
+```sh
+tollgate
+```
+
+It prints the two lines you need:
+
+```
+Tollgate listening on http://127.0.0.1:4141
+Capturing to /Users/you/.tollgate/captured.jsonl
+
+Point your app at it — no code change needed:
+
+  export ANTHROPIC_BASE_URL=http://127.0.0.1:4141
+  export OPENAI_BASE_URL=http://127.0.0.1:4141/v1
+
+Then run your app as usual, and `tollgate report` to see the cost.
+```
+
+Export those where your app already gets its API key, start it, and watch
+traffic arrive:
+
+```
+15:49:34  claude-opus-5                 12,403 in      380 out     2,143ms      $0.0755
+15:49:35  gpt-4o                           800 in       95 out       412ms      $0.0030
+```
+
+Nothing else changes: your key is forwarded untouched, streaming still streams,
+and unsetting the variable puts you back to talking to the provider directly.
+Setting `base_url` in code works too, if you'd rather be explicit.
+
+**You can't get the `/v1` wrong.** Anthropic's SDK appends `/v1` to a base URL
+and OpenAI's expects you to supply it, so the same setting works for one and
+404s the other. Tollgate accepts every shape a mis-set base URL produces —
+`/messages`, `/chat/completions`, even `/v1/v1/messages` — and records them all
+under the canonical endpoint, so a report never splits across them.
+
+Then, once you have some traffic:
 
 ```sh
 tollgate report

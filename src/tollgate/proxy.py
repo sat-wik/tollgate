@@ -35,6 +35,25 @@ UPSTREAMS = {
 
 _HOP_HEADERS = {"host", "content-length", "connection", "accept-encoding"}
 
+#: The two SDKs disagree about who owns the `/v1` in a base URL — Anthropic
+#: appends it, OpenAI expects you to supply it. So the same base URL that works
+#: for one 404s for the other, and the mistake is invisible: you get a 404 from
+#: a proxy that is running perfectly. Rather than make that the user's problem,
+#: accept the shapes a mis-set base URL produces and route them to the right
+#: upstream. Every alias is recorded under its canonical endpoint, so a report
+#: never splits across them.
+ALIASES = {
+    # OpenAI SDK pointed at a base URL with no /v1
+    "/chat/completions": "/v1/chat/completions",
+    "/responses": "/v1/responses",
+    # Anthropic SDK pointed at a base URL that already ends in /v1
+    "/v1/v1/messages": "/v1/messages",
+    "/v1/v1/chat/completions": "/v1/chat/completions",
+    "/v1/v1/responses": "/v1/responses",
+    # Anthropic SDK pointed at a base URL with the /v1 stripped
+    "/messages": "/v1/messages",
+}
+
 
 def default_capture_path() -> str:
     return os.path.join(os.path.expanduser("~/.tollgate"), "captured.jsonl")
@@ -146,7 +165,11 @@ def warn_once(exc: BaseException, path: str) -> None:
         )
 
 
-def capture(writer: CaptureWriter, build: Callable[[], dict[str, Any]]) -> None:
+def capture(
+    writer: CaptureWriter,
+    build: Callable[[], dict[str, Any]],
+    on_record: Callable[[dict[str, Any]], None] | None = None,
+) -> None:
     """Build and write a record, and never let either step break the call.
 
     Tollgate sits in the request path of an application that would work fine
@@ -175,7 +198,10 @@ def capture(writer: CaptureWriter, build: Callable[[], dict[str, Any]]) -> None:
     observed.
     """
     try:
-        writer.submit(build())
+        record = build()
+        writer.submit(record)
+        if on_record is not None:
+            on_record(record)
     except Exception as exc:  # noqa: BLE001 - capture must never propagate
         warn_once(exc, writer.path)
 
@@ -207,7 +233,10 @@ def _error_body(raw: str) -> dict[str, Any]:
 # -- the proxy app -----------------------------------------------------------
 
 
-def create_app(capture_path: str | None = None) -> FastAPI:
+def create_app(
+    capture_path: str | None = None,
+    on_record: Callable[[dict[str, Any]], None] | None = None,
+) -> FastAPI:
     capture_path = capture_path or default_capture_path()
     writer = CaptureWriter(capture_path)
     writer.start(on_error=lambda exc: warn_once(exc, capture_path))
@@ -252,6 +281,7 @@ def create_app(capture_path: str | None = None) -> FastAPI:
                 stream=stream,
                 latency_ms=(time.perf_counter() - started) * 1000,
             ),
+            on_record,
         )
         return Response(
             content=json.dumps(body).encode(),
@@ -327,7 +357,7 @@ def create_app(capture_path: str | None = None) -> FastAPI:
                             truncated=not completed,
                         )
 
-                    capture(writer, record)
+                    capture(writer, record, on_record)
 
             return StreamingResponse(
                 relay(),
@@ -357,6 +387,7 @@ def create_app(capture_path: str | None = None) -> FastAPI:
                     status=resp.status_code,
                     latency_ms=elapsed,
                 ),
+                on_record,
             )
         return Response(
             content=resp.content,
@@ -375,5 +406,51 @@ def create_app(capture_path: str | None = None) -> FastAPI:
 
     for path in UPSTREAMS:
         app.post(path)(route_for(path))
+    for alias, canonical_path in ALIASES.items():
+        app.post(alias)(route_for(canonical_path))
+
+    @app.get("/")
+    async def status():
+        """Somewhere to point a browser to confirm the thing is actually up."""
+        from . import __version__
+
+        return {
+            "tollgate": __version__,
+            "listening": True,
+            "capturing_to": capture_path,
+            "captured_this_run": writer.written,
+            "dropped": writer.dropped,
+            "endpoints": sorted(UPSTREAMS),
+        }
+
+    @app.api_route("/{unmatched:path}", methods=["GET", "POST"])
+    async def unknown(unmatched: str, request: Request):
+        """Explain the base-URL mistake instead of returning a bare 404.
+
+        Someone who gets here has a running proxy and a misconfigured client,
+        which is the least obvious failure to debug from the outside: nothing
+        is broken, and the 404 looks like it came from the provider. The
+        address is taken from the request so the advice can be pasted as-is.
+        """
+        base = f"{request.url.scheme}://{request.url.netloc}"
+        return Response(
+            content=json.dumps(
+                {
+                    "error": {
+                        "type": "not_a_tollgate_endpoint",
+                        "message": (
+                            f"Tollgate is running, but nothing here handles /{unmatched}. "
+                            "Check your client's base_url — Anthropic appends the /v1 "
+                            "itself and OpenAI expects you to supply it, so they differ."
+                        ),
+                        "anthropic_base_url": base,
+                        "openai_base_url": f"{base}/v1",
+                        "endpoints": sorted(UPSTREAMS),
+                    }
+                }
+            ).encode(),
+            status_code=404,
+            media_type="application/json",
+        )
 
     return app
