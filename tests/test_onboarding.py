@@ -9,7 +9,7 @@ import json
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from tollgate.cli import live_line
 from tollgate.proxy import ALIASES, create_app

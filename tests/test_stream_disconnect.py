@@ -14,8 +14,9 @@ import time
 import httpx
 import pytest
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from starlette.applications import Starlette
+from starlette.responses import StreamingResponse
+from starlette.routing import Route
 
 CHUNK = b'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"tok"}}\n\n'
 
@@ -42,10 +43,7 @@ def _serve(app, port):
 
 @pytest.fixture(scope="module")
 def proxy_url(tmp_path_factory):
-    upstream = FastAPI()
-
-    @upstream.post("/v1/messages")
-    async def messages():
+    async def messages(request):
         async def gen():
             yield (
                 b'data: {"type":"message_start","message":'
@@ -58,6 +56,7 @@ def proxy_url(tmp_path_factory):
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    upstream = Starlette(routes=[Route("/v1/messages", messages, methods=["POST"])])
     up_port = _free_port()
     _serve(upstream, up_port)
 

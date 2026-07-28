@@ -1,0 +1,37 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Homebrew installs against the newest Python, so 3.13 has to pass;
+        # 3.12 is the floor declared in pyproject. Linux and macOS both matter
+        # because the capture writer uses flock.
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: python -m pip install --upgrade pip && pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest -q
+
+      - name: Check the package builds and its metadata is valid
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*

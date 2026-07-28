@@ -10,7 +10,7 @@ from contextlib import contextmanager
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 
 from tollgate.proxy import create_app
 

@@ -22,8 +22,10 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Iterator
 
 import httpx
-from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response, StreamingResponse
+from starlette.routing import Route
 
 from .record import CaptureWriter, build_record
 
@@ -236,14 +238,14 @@ def _error_body(raw: str) -> dict[str, Any]:
 def create_app(
     capture_path: str | None = None,
     on_record: Callable[[dict[str, Any]], None] | None = None,
-) -> FastAPI:
+) -> Starlette:
     capture_path = capture_path or default_capture_path()
     writer = CaptureWriter(capture_path)
     writer.start(on_error=lambda exc: warn_once(exc, capture_path))
     state: dict[str, httpx.AsyncClient] = {}
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(app: Starlette):
         # One pooled client for the process lifetime. Opening a client per
         # request would put a fresh TCP and TLS handshake inside the window
         # this proxy is measuring, overstating provider latency by the
@@ -255,11 +257,6 @@ def create_app(
             await state.pop("client").aclose()
             # Drain anything still queued before the process goes away.
             writer.stop()
-
-    app = FastAPI(title="Tollgate", docs_url=None, redoc_url=None, lifespan=lifespan)
-    # Exposed so an embedder (or a test) can force queued records to disk
-    # before reading the log; capture is asynchronous by design.
-    app.state.capture_writer = writer
 
     def _unreachable(
         endpoint: str,
@@ -396,35 +393,27 @@ def create_app(
         )
 
     def route_for(endpoint: str):
-        # The handler's `request` parameter must be annotated `Request`, or
-        # FastAPI reads it as a query parameter and rejects every call with a
-        # 422 before the proxy ever runs.
         async def route(request: Request):
             return await proxy(request, endpoint)
 
         return route
 
-    for path in UPSTREAMS:
-        app.post(path)(route_for(path))
-    for alias, canonical_path in ALIASES.items():
-        app.post(alias)(route_for(canonical_path))
-
-    @app.get("/")
-    async def status():
+    async def status(request: Request):
         """Somewhere to point a browser to confirm the thing is actually up."""
         from . import __version__
 
-        return {
-            "tollgate": __version__,
-            "listening": True,
-            "capturing_to": capture_path,
-            "captured_this_run": writer.written,
-            "dropped": writer.dropped,
-            "endpoints": sorted(UPSTREAMS),
-        }
+        return JSONResponse(
+            {
+                "tollgate": __version__,
+                "listening": True,
+                "capturing_to": capture_path,
+                "captured_this_run": writer.written,
+                "dropped": writer.dropped,
+                "endpoints": sorted(UPSTREAMS),
+            }
+        )
 
-    @app.api_route("/{unmatched:path}", methods=["GET", "POST"])
-    async def unknown(unmatched: str, request: Request):
+    async def unknown(request: Request):
         """Explain the base-URL mistake instead of returning a bare 404.
 
         Someone who gets here has a running proxy and a misconfigured client,
@@ -432,6 +421,7 @@ def create_app(
         is broken, and the 404 looks like it came from the provider. The
         address is taken from the request so the advice can be pasted as-is.
         """
+        unmatched = request.path_params.get("unmatched", "")
         base = f"{request.url.scheme}://{request.url.netloc}"
         return Response(
             content=json.dumps(
@@ -453,4 +443,18 @@ def create_app(
             media_type="application/json",
         )
 
+    routes = [Route(path, route_for(path), methods=["POST"]) for path in UPSTREAMS]
+    routes += [
+        Route(alias, route_for(canonical), methods=["POST"])
+        for alias, canonical in ALIASES.items()
+    ]
+    routes.append(Route("/", status, methods=["GET"]))
+    # Last: Starlette matches in order, so the catch-all must not shadow the
+    # real endpoints above it.
+    routes.append(Route("/{unmatched:path}", unknown, methods=["GET", "POST"]))
+
+    app = Starlette(routes=routes, lifespan=lifespan)
+    # Exposed so an embedder (or a test) can force queued records to disk
+    # before reading the log; capture is asynchronous by design.
+    app.state.capture_writer = writer
     return app

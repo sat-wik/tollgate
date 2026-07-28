@@ -10,13 +10,29 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 authors = [{ name = "Satwik Pattanaik" }]
-dependencies = ["fastapi>=0.110", "httpx>=0.27", "uvicorn>=0.29"]
+dependencies = ["starlette>=0.37", "httpx>=0.27", "uvicorn>=0.29"]
+keywords = ["llm", "openai", "anthropic", "proxy", "observability", "cost", "tokens"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Monitoring",
+  "Topic :: Software Development :: Debuggers",
+  "Typing :: Typed",
+]
+
 
 [project.scripts]
 tollgate = "tollgate.cli:main"
 
 [project.urls]
+Homepage = "https://github.com/sat-wik/tollgate"
 Repository = "https://github.com/sat-wik/tollgate"
+Issues = "https://github.com/sat-wik/tollgate/issues"
+Changelog = "https://github.com/sat-wik/tollgate/releases"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
